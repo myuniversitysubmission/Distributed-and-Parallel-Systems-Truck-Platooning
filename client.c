@@ -3,6 +3,7 @@
 #include <string.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include<unistd.h>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -47,20 +48,39 @@ int main(int argc, char *argv[]){
 
     // Connect to server
     if (connect(clientSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        printf("Connection to server failed.\n");
+        printf("Connection to server failed.\n", WSAGetLastError());
         closesocket(clientSocket);
         WSACleanup();
         return 1;
     }    
 
-    // Send velocity data
-    const char *velocity = "helloo worlddd";
+    while(1){ // Send velocity data
+    const char *velocity = argv[1];
     int len = strlen(velocity);
     int bytesSent = send(clientSocket, velocity, len, 0);
     if (bytesSent == SOCKET_ERROR) {
-        printf("Failed to send data.\n", WSAGetLastError());
-    } else {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            // no data yet, continue loop
+            continue;
+        }
+        else{
+            printf("\n Server disconnected\n");
+            closesocket(clientSocket);
+            return -1;
+        }
+    }
+    else if (bytesSent == 0)
+    {
+        printf("\n Server disconnected\n");
+        closesocket(clientSocket);
+        WSACleanup();
+    }
+    else {
         printf("Sent %d bytes: %s\n", bytesSent, velocity);
+    }
+    
+    sleep(5); // Sleep briefly to avoid busy-waiting
     }
 
     closesocket(clientSocket);
