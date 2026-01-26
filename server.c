@@ -18,6 +18,8 @@
 #pragma comment(lib, "Ws2_32.lib")
 #include <unistd.h>
 #include <fcntl.h>
+#include "truck.h"
+#include "frame.h"
 
 // #endif
 
@@ -99,8 +101,72 @@ void *clientHandler(void *client)
             free(tempArgument);
             return NULL;
         }
+
+
+        // (3) Parse received bytes
     }
 }
+
+void urgentBrakeAll(struct Truck *leader, SOCKET *clientSockets)
+{
+    leader->currentSpeed = 0;
+    printf("Urgent brake applied to ALL! Leader speed = 0\n");
+    int count = sizeof(clientSockets);
+
+    for(int i = 0; i < count; i++){
+
+        SOCKET s = clientSockets[i];
+        if (s == INVALID_SOCKET) {
+            continue;
+        }
+
+        char *msg = constructMessage(leader->id, 1, leader->currentSpeed, 
+            leader->currentPosition, EMERGENCY_BRAKE);
+
+        if(msg == NULL) {
+            printf("urgentBrakeAll: constructMessage failed for client %d\n", i);
+            continue;
+        } else {
+            send(s, msg, strlen(msg), 0);
+        }
+        
+        free(msg);
+    }
+    
+   
+
+}
+
+int telematicComm(struct Truck *leader, SOCKET clientSocket, int speed, int distance)
+{
+    
+    leader->currentSpeed    = speed;
+    leader->currentPosition = distance;
+
+    char *msg = constructMessage(
+        leader->id,
+        1,          
+        SPEED,
+        leader->currentSpeed,
+        SPEED 
+    );
+
+    if(msg == NULL) {
+        printf("telematicComm: constructMessage failed\n");
+        return -1;
+    } else {
+        send(clientSocket, msg, strlen(msg), 0);
+    }
+
+    printf("Sending telematic command: speed=%d distance=%d\n",speed, distance);
+
+    free(msg);
+    return 0;
+}
+
+
+
+
 
 int main()
 {

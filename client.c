@@ -3,32 +3,227 @@
 #include <string.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include<unistd.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <pthread.h>
+
+#include "truck.h"
+#include "frame.h"
 
 #pragma comment(lib, "Ws2_32.lib")
+typedef enum{
+    e_kill = 0U, 
+    e_active =1U }
+state;
 
-int main(int argc, char *argv[]){
+struct Truck truck;
+int SIGNAL_MAIN_THREAD = e_active;
 
+
+bool matchSpeed(struct Truck *t, int targetSpeed)
+{
+    t->currentSpeed = targetSpeed;
+    printf("Truck %d: Speed matched to %d\n", t->id, t->currentSpeed);
+    return true;
+}
+
+bool matchDistance(struct Truck *t, int targetDistance)
+{
+
+    t->currentPosition = targetDistance;
+    printf("Truck %d: position matched to %d\n", t->id, t->currentPosition);
+
+    return true;
+}
+
+void reportIntrusion(struct Truck *t)
+{
+
+    t->currentSpeed = 20;
+    printf("Truck %d: Intrusion detected! Speed reduced to %d\n", t->id, t->currentSpeed);
+
+    // char *msg = constructMessage(t->id, 1, t->currentSpeed, t->currentPosition, INTRUSION);
+    // if (msg == NULL)
+    // {
+    //     printf("reportIntrusion: constructMessage failed\n");
+    // }
+    // else
+    // {
+    //     printf("reportIntrusion: constructed message: %s", msg);
+    // }
+}
+
+void *TXthread(void* socketTXCopy){
+    // construct a message()
+    // SendMessage()
+    // check Error in message()
+    while(1){
+        SOCKET* SocketTX = (SOCKET*) socketTXCopy;
+        char *msg = NULL;
+        switch (0 /*temp_case*/)
+        {
+        case INTRUSION:
+            msg = constructMessage(
+                truck.id,               // truck_id
+                e_read,                 // rw = write
+                0,                   // reporting intrusion
+                0,                   // reporting intrusion
+                INTRUSION               // eventType
+            );
+            break;
+
+        case SPEED:
+            msg = constructMessage(
+                truck.id,              // truck_id
+                e_read,                     // rw = write
+                0,    // reading speed
+                0, // reading speed
+                SPEED              // eventType
+            );
+            break;
+
+        case DISTANCE:
+            msg = constructMessage(
+                truck.id,              // truck_id
+                e_read,               // rw = write
+                0,    // reading distance
+                0, // reading distance
+                DISTANCE              // eventType
+            );
+            break;
+        default:
+            break;
+        }
+
+        if (msg == NULL)
+        {
+            printf("Failed to construct frame message\n");
+        }
+
+        int len = (int)strlen(msg);
+        int bytesSent = send(*SocketTX, msg, len, 0);
+        free(msg);
+
+        if (bytesSent == SOCKET_ERROR)
+        {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK)
+            {
+                // no data yet, continue loop
+                // do_nothing
+            }
+            else
+            {
+                printf("\n Server disconnected\n");
+                closesocket(*SocketTX);
+                return (NULL);
+            }
+        }
+        else if (bytesSent == 0)
+        {
+            printf("\n Server disconnected\n");
+            closesocket(*SocketTX);
+            WSACleanup();
+        }
+        else
+        {
+            printf("Sent %d bytes: %d;%d;time;event;v;d ...\n", bytesSent, truck.id, truck.currentSpeed);
+        }
+
+        sleep(5); // Sleep briefly to avoid busy-waiting
+    }
+}
+
+void *RXthread(void* socketRXCopy){
+    SOCKET* socketRX = (SOCKET*) socketRXCopy;
+    char RXBuffer[1024];
+    DataFrame *receivedFrame;
+
+    while(1){
+        //(1) Receive message
+        int bytesReceived = recv(*socketRX, RXBuffer, sizeof(RXBuffer) - 1, 0);
+
+        //(2) parse message / check error in message
+        if (bytesReceived > 0)
+        {
+            RXBuffer[bytesReceived] = '\0';
+            receivedFrame = parseMessage(RXBuffer);
+        }
+        if (bytesReceived == SOCKET_ERROR)
+        {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK)
+            {
+                // no data yet, continue loop
+                continue;
+            }
+            else
+            {
+                printf("\n Server disconnected\n");
+                closesocket(*socketRX);
+
+                return NULL;
+            }
+            // real error
+        }
+        else if (bytesReceived == 0)
+        {
+            printf("\n Server disconnected\n");
+            closesocket(*socketRX);
+            return NULL;
+        }
+        //(3) execute state_machine
+
+        switch(receivedFrame->eventType){
+            case SPEED:
+                matchSpeed(&truck, receivedFrame->value);
+                break;
+            case DISTANCE:
+                matchDistance(&truck, receivedFrame->value);
+                break;
+            case INTRUSION:
+                printf("\n Intrusion acknowledged");
+                break;
+            case LANE_CHANGE:
+                printf("\n Leader is changing lane");
+                break;
+            case LEADER_LEFT:
+                printf("\n Leader is leaving");
+                break;
+            default:
+                printf("\n Undefined state");
+        }
+
+    }
+
+}
+int main(int argc, char *argv[])
+{
+
+    state client_state = e_active;
     WSADATA wsaData;
     SOCKET clientSocket;
     struct sockaddr_in serverAddr;
     int port = 8080;
 
     // Check command line arguments
-    if (argc != 2) {
+    if (argc != 2)
+    {
         printf("Usage: %s <velocity>\n", argv[0]);
         return 1;
     }
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
         printf("Failed to initialize Winsock.\n");
         return 1;
     }
 
     // Create socket
     clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == INVALID_SOCKET) {
+    if (clientSocket == INVALID_SOCKET)
+    {
         printf("Failed to create socket.\n");
         WSACleanup();
         return 1;
@@ -39,7 +234,8 @@ int main(int argc, char *argv[]){
     serverAddr.sin_port = htons(port);
     int result = inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
-    if (result <= 0) {
+    if (result <= 0)
+    {
         printf("Address not supported.\n");
         closesocket(clientSocket);
         WSACleanup();
@@ -47,42 +243,43 @@ int main(int argc, char *argv[]){
     }
 
     // Connect to server
-    if (connect(clientSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+    if (connect(clientSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
+    {
         printf("Connection to server failed.\n", WSAGetLastError());
         closesocket(clientSocket);
         WSACleanup();
         return 1;
-    }    
+    }
 
-    while(1){ // Send velocity data
-    const char *velocity = argv[1];
-    int len = strlen(velocity);
-    int bytesSent = send(clientSocket, velocity, len, 0);
-    if (bytesSent == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
-            // no data yet, continue loop
-            continue;
-        }
-        else{
-            printf("\n Server disconnected\n");
-            closesocket(clientSocket);
-            return -1;
-        }
-    }
-    else if (bytesSent == 0)
-    {
-        printf("\n Server disconnected\n");
-        closesocket(clientSocket);
-        WSACleanup();
-    }
-    else {
-        printf("Sent %d bytes: %s\n", bytesSent, velocity);
-    }
+    truck.id = 1;
+    truck.currentSpeed = atoi(argv[1]); // Only for initialisation
+    truck.currentPosition = 0;  // TODO: get currentPosition from Server.
     
-    sleep(5); // Sleep briefly to avoid busy-waiting
-    }
+    // create a seperate thread for TX & RX similar to Embedded systems
+    // we do it seperately because, if leader election has to be integrated - then a code should have both follower & leader part inside it.
+    
+    // Deciding leader while starting - based on who starts first instance, the leader has to be decided.
+    // whoever joins next would be a follwoer & assigned an ID.
+    // Deciding leader in runtime - if current elader exits, it nominates the next immediate truck.
+    // that one truck alone, will close connection & start a socket, all others can join to that network again.
 
+
+    pthread_t threadList[2];  
+    
+    pthread_create(&threadList[0], NULL,TXthread, &clientSocket);
+    pthread_detach(threadList[0]);
+
+    pthread_create(&threadList[1], NULL,RXthread, &clientSocket);
+    pthread_detach(threadList[1]);
+
+    while (client_state == e_active)
+    { 
+        //implement Follower/Leader
+        // Kill logic
+        scanf("%d",&client_state);
+    }
+    //kill exits loop & destroys sockets to end program.
     closesocket(clientSocket);
     WSACleanup();
+
 }
