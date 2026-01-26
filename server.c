@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include "truck.h"
 #include "frame.h"
+#include "queue.c"
 
 // #endif
 
@@ -34,6 +35,7 @@ typedef struct s_clientInfo
 {
     SOCKET *socClient;
     int client_id;
+    TxQueue txQueue;
 } clientInfo;
 
 // Macros
@@ -45,10 +47,12 @@ typedef struct s_clientInfo
 u_long mode = NON_BLOCKING;
 u_long modeConnection = BLOCKING;
 int id = 0;
-void *clientHandler(void *client)
+void *ServerRxHandler(void *clientInfoRxCopy)
 {
-    char buffer[1024];
-    clientInfo *tempArgument = (clientInfo *)client;
+    char RXBuffer[1024];
+    DataFrame *receivedFrame;
+    
+    clientInfo *tempArgument = (clientInfo *)clientInfoRxCopy;
     SOCKET *tempClient = tempArgument->socClient;
     if (*tempClient == INVALID_SOCKET)
     {
@@ -65,15 +69,18 @@ void *clientHandler(void *client)
     }
 
     printf("Client connected.\n");
-    memset(buffer, 0, sizeof(buffer));
+    memset(RXBuffer, 0, sizeof(RXBuffer));
     while (1)
     {
-        int bytesReceived = recv(*tempClient, buffer, sizeof(buffer) - 1, 0);
-        // printf(" socket fd is  %d : %s",tempArgument->client_id,  buffer);
+        int bytesReceived = recv(*tempClient, RXBuffer, sizeof(RXBuffer) - 1, 0);
+        // printf(" socket fd is  %d : %s",tempArgument->client_id,  RXBuffer);
 
         if (bytesReceived > 0)
         {
-            printf("\n Printing from %d : %s", tempArgument->client_id, buffer);
+            printf("\n Printing from %d : %s", tempArgument->client_id, RXBuffer);
+            receivedFrame = parseMessage(RXBuffer);
+            TxQueue_push(&tempArgument->txQueue, receivedFrame);
+
         }
         if (bytesReceived == SOCKET_ERROR)
         {
@@ -104,6 +111,31 @@ void *clientHandler(void *client)
 
 
         // (3) Parse received bytes
+
+    }
+}
+
+void *ServerTxHandler(void *clientInfoTxCopy) {
+    clientInfo *ci = (clientInfo *)clientInfoTxCopy;
+    SOCKET s = *(ci->socClient);
+    DataFrame msg;
+
+    while (1) {
+        TxQueue_pop(&ci->txQueue, &msg);
+
+        char *frame;
+        frame = constructMessage(
+            ci->client_id,
+            1,
+            msg.param,
+            msg.value,
+            msg.eventType
+        );
+
+        if (frame) {
+            send(s, frame, strlen(frame), 0);
+            free(frame);
+        }
     }
 }
 
@@ -268,12 +300,19 @@ int main()
             newClient->socClient = malloc(sizeof(SOCKET));
             *(newClient->socClient) = newSocket;
             newClient->client_id = id++;
+            TxQueue_init(&newClient->txQueue);
+
             printf("New connection, socket fd is %d\n", newSocket);
             usleep(1000); // Sleep briefly to avoid busy-waiting
 
-            pthread_t t;
-            pthread_create(&t, NULL, clientHandler, (void *)(newClient));
-            pthread_detach(t);
+            pthread_t rxThread, txThread;
+
+            pthread_create(&rxThread, NULL, ServerRxHandler, (void *)newClient);
+            pthread_detach(rxThread);
+
+            pthread_create(&txThread, NULL, ServerTxHandler, (void *)newClient);
+            pthread_detach(txThread);
+
         }
     }
 
