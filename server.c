@@ -51,7 +51,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 {
     char RXBuffer[1024];
     DataFrame *receivedFrame;
-    
+
     clientInfo *tempArgument = (clientInfo *)clientInfoRxCopy;
     SOCKET *tempClient = tempArgument->socClient;
     if (*tempClient == INVALID_SOCKET)
@@ -80,7 +80,6 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             printf("\n Printing from %d : %s", tempArgument->client_id, RXBuffer);
             receivedFrame = parseMessage(RXBuffer);
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
-
         }
         if (bytesReceived == SOCKET_ERROR)
         {
@@ -108,31 +107,58 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             free(tempArgument);
             return NULL;
         }
-
-
-        // (3) Parse received bytes
-
     }
 }
 
-void *ServerTxHandler(void *clientInfoTxCopy) {
+void *ServerTxHandler(void *clientInfoTxCopy)
+{
     clientInfo *ci = (clientInfo *)clientInfoTxCopy;
     SOCKET s = *(ci->socClient);
     DataFrame msg;
 
-    while (1) {
+    while (1)
+    {
         TxQueue_pop(&ci->txQueue, &msg);
 
         char *frame;
-        frame = constructMessage(
-            ci->client_id,
-            1,
-            msg.param,
-            msg.value,
-            msg.eventType
-        );
 
-        if (frame) {
+        switch (msg.eventType)
+        {
+        case INTRUSION:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                0,             // reporting intrusion
+                0,             // reporting intrusion
+                INTRUSION      // eventType
+            );
+            break;
+
+        case SPEED:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                SPEED,         // reading speed
+                60U,           // reading speed
+                SPEED          // eventType
+            );
+            break;
+
+        case DISTANCE:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                DISTANCE,      // reading distance
+                12U,           // reading distance
+                DISTANCE       // eventType
+            );
+            break;
+        default:
+            break;
+        }
+
+        if (frame)
+        {
             send(s, frame, strlen(frame), 0);
             free(frame);
         }
@@ -145,64 +171,50 @@ void urgentBrakeAll(struct Truck *leader, SOCKET *clientSockets)
     printf("Urgent brake applied to ALL! Leader speed = 0\n");
     int count = sizeof(clientSockets);
 
-    for(int i = 0; i < count; i++){
+    for (int i = 0; i < count; i++)
+    {
 
         SOCKET s = clientSockets[i];
-        if (s == INVALID_SOCKET) {
+        if (s == INVALID_SOCKET)
+        {
             continue;
         }
 
-        char *msg = constructMessage(leader->id, 1, leader->currentSpeed, 
-            leader->currentPosition, EMERGENCY_BRAKE);
+        char *msg = constructMessage(leader->id, 1, leader->currentSpeed,
+                                     leader->currentPosition, EMERGENCY_BRAKE);
 
-        if(msg == NULL) {
+        if (msg == NULL)
+        {
             printf("urgentBrakeAll: constructMessage failed for client %d\n", i);
             continue;
-        } else {
+        }
+        else
+        {
             send(s, msg, strlen(msg), 0);
         }
-        
+
         free(msg);
     }
-    
-   
-
 }
 
 int telematicComm(struct Truck *leader, SOCKET clientSocket, int speed, int distance)
 {
-    
-    leader->currentSpeed    = speed;
+
+    leader->currentSpeed = speed;
     leader->currentPosition = distance;
 
     char *msg = constructMessage(
         leader->id,
-        1,          
+        1,
         SPEED,
         leader->currentSpeed,
-        SPEED 
-    );
+        SPEED);
 
-    if(msg == NULL) {
-        printf("telematicComm: constructMessage failed\n");
-        return -1;
-    } else {
-        send(clientSocket, msg, strlen(msg), 0);
-    }
-
-    printf("Sending telematic command: speed=%d distance=%d\n",speed, distance);
-
-    free(msg);
     return 0;
 }
 
-
-
-
-
 int main()
 {
-
 #ifndef USE_LINUX
     // winsocket initialisation
     WSADATA wsaData;
@@ -312,7 +324,6 @@ int main()
 
             pthread_create(&txThread, NULL, ServerTxHandler, (void *)newClient);
             pthread_detach(txThread);
-
         }
     }
 

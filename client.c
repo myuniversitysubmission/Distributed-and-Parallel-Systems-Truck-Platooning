@@ -57,10 +57,11 @@ void *TXthread(void* socketTXCopy){
     // construct a message()
     // SendMessage()
     // check Error in message()
+    int temp_case = INTRUSION;
     while(1){
         SOCKET* SocketTX = (SOCKET*) socketTXCopy;
         char *msg = NULL;
-        switch (0 /*temp_case*/)
+        switch (temp_case)
         {
         case INTRUSION:
             msg = constructMessage(
@@ -70,6 +71,7 @@ void *TXthread(void* socketTXCopy){
                 0,                   // reporting intrusion
                 INTRUSION               // eventType
             );
+            temp_case = SPEED;
             break;
 
         case SPEED:
@@ -80,6 +82,7 @@ void *TXthread(void* socketTXCopy){
                 0, // reading speed
                 SPEED              // eventType
             );
+            temp_case = DISTANCE;
             break;
 
         case DISTANCE:
@@ -90,14 +93,18 @@ void *TXthread(void* socketTXCopy){
                 0, // reading distance
                 DISTANCE              // eventType
             );
+            temp_case = 7;
             break;
         default:
+            free(msg);
             break;
         }
 
         if (msg == NULL)
         {
             printf("Failed to construct frame message\n");
+            closesocket(*SocketTX);
+            return (NULL);
         }
 
         int len = (int)strlen(msg);
