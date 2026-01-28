@@ -1,0 +1,57 @@
+<<<<<<< HEAD
+############################
+# OS & Editor
+############################
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+############################
+# Python
+############################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+.env
+.venv/
+venv/
+pip-wheel-metadata/
+
+############################
+# Jupyter
+############################
+.ipynb_checkpoints/
+
+############################
+# Git – KULLANICIYA ÖZEL
+############################
+.bash_history
+.gitconfig
+
+############################
+# Android / Emulator
+############################
+.android/
+adbkey
+adbkey.pub
+.emulator_console_auth_token
+
+############################
+# Build / Output
+############################
+build/
+dist/
+*.egg-info/
+
+############################
+# Temporary files
+############################
+*.tmp
+*.swp
+*.bak
+=======
+/*.exe
+>>>>>>> fed6cbf (Updated behaviour methods)
