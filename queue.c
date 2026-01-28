@@ -1,17 +1,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include "frame.h"
-
-#define TX_QUEUE_SIZE 32
-
-typedef struct {
-    DataFrame buf[TX_QUEUE_SIZE];
-    int head;
-    int tail;
-    int count;
-    pthread_mutex_t lock;
-    pthread_cond_t  notEmpty;
-} TxQueue;
+#include "queue.h"
 
 void TxQueue_init(TxQueue *q) {
     q->head = q->tail = q->count = 0;

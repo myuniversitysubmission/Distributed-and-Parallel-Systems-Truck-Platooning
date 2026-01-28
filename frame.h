@@ -3,6 +3,7 @@
 #define FRAME_H
 
 #include <time.h>
+#include "truck.h"
 
 typedef enum {
     INTRUSION = 0,
@@ -26,7 +27,6 @@ typedef enum
 
 typedef struct {
     int truck_id;
-    time_t time;
     int readWriteFlag; // 0 = read, 1 = write
     int param;
     int value;

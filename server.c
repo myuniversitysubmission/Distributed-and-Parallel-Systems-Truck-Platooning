@@ -2,29 +2,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-// What we want is to have clients reach server with client ID
-// server will then post messages from them.
-// If client kills itself server should recognise that.
-
-// we cannot run in both windows & linux with same libraries. So using a ehader to differentiate
-// #ifdef USE_LINUX
-
-//     #include <arpa/inet.h>
-//     #include <sys/socket.h>
-
-// #else
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "Ws2_32.lib")
 #include <unistd.h>
 #include <fcntl.h>
 #include "truck.h"
 #include "frame.h"
-#include "queue.c"
+// What we want is to have clients reach server with client ID
+// server will then post messages from them.
+// If client kills itself server should recognise that.
 
-// #endif
+#include "queue.h"
 
-// Function prototypes & definitions
+#pragma comment(lib, "Ws2_32.lib")
 
 struct ip_addr
 {
@@ -69,19 +59,18 @@ int assignFreeID() {
 }
 
 // To inform all other clients if one client left the platoon. Used for clock matrix
-void broadcastClientLeft(unsigned int leftId) {
+void broadcastClientLeft(unsigned int leftId, unsigned int leftPosition) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (g_clients[i] != NULL && g_clients[i]->client_id != (leftId+1)) {
+        if (g_clients[i] != NULL && g_clients[i]->client_id != (leftId)) {
             DataFrame *df = malloc(sizeof(DataFrame));
             df->truck_id = g_clients[i]->client_id;
             df->eventType = CLIENT_LEFT;
             df->readWriteFlag = e_write;
-            df->param = leftId+1; // leftid
-            if(i > leftId){
+            df->param = leftId; // leftid
+            if(g_clients[i]->client_position > leftPosition){
                 printf("\nclient[%d], pos_existing = %d",g_clients[i]->client_id, g_clients[i]->client_position);
                 g_clients[i]->client_position = g_clients[i]->client_position - 1;
                 printf("\nclient[%d], pos_new = %d",g_clients[i]->client_id, g_clients[i]->client_position);
-
             }
             df->value = g_clients[i]->client_position; //new position
             printf("\n i= %d, client_id=%d, leftID+1= %d, new_pos =%d, ",i,g_clients[i]->client_id, leftId+1, g_clients[i]->client_position);
@@ -122,6 +111,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
         if (bytesReceived > 0)
         {
             printf("\n Printing from %u : %s", tempArgument->client_id, RXBuffer);
+            //TODO: printf("\n Printing from %d : %s", tempArgument->client_id + 1, RXBuffer);
             receivedFrame = parseMessage(RXBuffer);
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
         }
@@ -143,7 +133,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 g_followerCount--;    // reduce active count
                 receivedFrame->eventType = SHUTDOWN;
                 TxQueue_push(&tempArgument->txQueue, receivedFrame);
-                broadcastClientLeft(id); // broadcast to others
+                broadcastClientLeft(tempArgument->client_id,tempArgument->client_position); // broadcast to others
                 closesocket(*tempClient);
                 free(tempArgument->socClient);
                 free(tempArgument);
@@ -162,7 +152,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             g_followerCount--;    // reduce active count
             receivedFrame->eventType = SHUTDOWN;
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
-            broadcastClientLeft(id); // broadcast to others
+            broadcastClientLeft(tempArgument->client_id,tempArgument->client_position); // broadcast to others
             closesocket(*tempClient);
             free(tempArgument->socClient);
             free(tempArgument);
@@ -189,20 +179,19 @@ void *ServerTxHandler(void *clientInfoTxCopy)
         {
         case INTRUSION:
             frame = constructMessage(
-                ci->client_id, // truck_id
-                e_write,       // rw = write
-                0,             // reporting intrusion
-                0,             // reporting intrusion
-                INTRUSION      // eventType
+                ci->client_id, 
+                e_write,       
+                msg.param,             
+                msg.value,            
+                INTRUSION      
             );
             break;
-
         case SPEED:
             frame = constructMessage(
                 ci->client_id, // truck_id
                 e_write,       // rw = write
-                SPEED,         // reading speed
-                60U,           // reading speed
+                msg.param,             
+                msg.value,  
                 SPEED          // eventType
             );
             break;
@@ -211,8 +200,8 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             frame = constructMessage(
                 ci->client_id, // truck_id
                 e_write,       // rw = write
-                DISTANCE,      // reading distance
-                12U,           // reading distance
+                msg.param,             
+                msg.value,  
                 DISTANCE       // eventType
             );
             break;
@@ -224,6 +213,15 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 msg.param,     // id of the truck that left
                 msg.value,     // new position
                 CLIENT_LEFT    // 
+            );
+            break;
+        case EMERGENCY_BRAKE:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                0,             // speed = 0
+                msg.value,           // reading distance
+                EMERGENCY_BRAKE // eventType
             );
             break;
         default:
@@ -249,14 +247,13 @@ void urgentBrakeAll(struct Truck *leader, SOCKET *clientSockets)
 
     for (int i = 0; i < count; i++)
     {
-
         SOCKET s = clientSockets[i];
         if (s == INVALID_SOCKET)
         {
             continue;
         }
 
-        char *msg = constructMessage(leader->id, 1, leader->currentSpeed,
+        char *msg = constructMessage(leader->id, e_write, leader->currentSpeed,
                                      leader->currentDistance, EMERGENCY_BRAKE);
 
         if (msg == NULL)
@@ -281,14 +278,13 @@ int telematicComm(struct Truck *leader, SOCKET clientSocket, int speed, int dist
 
     char *msg = constructMessage(
         leader->id,
-        1,
-        SPEED,
+        e_write,
         leader->currentSpeed,
+        leader->currentDistance,
         SPEED);
 
     return 0;
 }
-
 
 int main()
 {

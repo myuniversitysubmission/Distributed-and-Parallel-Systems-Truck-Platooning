@@ -15,21 +15,15 @@ char *constructMessage(unsigned int truck_id,
         return NULL;
     }
 
-    time_t now = time(NULL);
-
-    // FORMAT:
-    // id;rw;time;eventType;velocity;distance\n
-    //  1  2    3     4        5        6
     int bytes = snprintf(
         buffer,
         BUF_SIZE,
-        "%d;%d;%lld;%d;%d;%d\n",
+        "%d %d %d %d %d\n",
         truck_id,       // 1
         (int)rw,        // 2
-        (long long)now, // 3
-        param,         // 4
-        value,         // 5
-        (int)eventType  // 6
+        param,          // 3
+        value,       // 4
+        (int)eventType  // 5
     );
 
     if (bytes < 0 || bytes >= BUF_SIZE) {
@@ -51,30 +45,25 @@ DataFrame *parseMessage(const char *message)
         return NULL;
     }
 
-    long long time_ll = 0;
     int eventInt = 0;
     int tempReadWrite = e_undef;
 
-    // id;rw;time;param;value,eventType\n
-    //  1  2    3     4   5        6
     int scanned = sscanf(
         message,
-        "%d;%d;%lld;%d;%d;%d",
+        "%d %d %d %d %d",
         &df->truck_id,  // 1
         &tempReadWrite, // 2
-        &time_ll,       // 3
-        &df->param,     // 4
-        &df->value,     // 5
-        &eventInt       // 6
+        &df->param,     // 3
+        &df->value,  // 4
+        &eventInt       // 5
     );
 
-    if (scanned != 6)
+    if (scanned != 5)
     {
         free(df);
         return NULL;
     }
 
-    df->time = (time_t)time_ll;
     df->eventType = (EventType)eventInt;
     df->readWriteFlag = (e_rw)tempReadWrite;
 

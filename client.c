@@ -22,57 +22,100 @@ state;
     }
 
 struct Truck truck;
-state client_state = e_active;
+volatile state client_state = e_active;
+pthread_mutex_t truck_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 bool matchSpeed(struct Truck *t, int targetSpeed)
 {
-    t->currentSpeed = targetSpeed;
-    printf("\n Truck %d: Speed matched to %d\n", t->id, t->currentSpeed);
-    return true;
+    int step = 5;
+
+    pthread_mutex_lock(&truck_mutex);
+
+    if (t->currentSpeed < targetSpeed) {
+        t->currentSpeed += step;
+        if (t->currentSpeed > targetSpeed)
+            t->currentSpeed = targetSpeed;
+    } else if (t->currentSpeed > targetSpeed) {
+        t->currentSpeed -= step;
+        if (t->currentSpeed < targetSpeed)
+            t->currentSpeed = targetSpeed;
+    }
+
+    printf("\n Truck %d: Speed = %d\n", t->id, t->currentSpeed);
+
+    pthread_mutex_unlock(&truck_mutex);
+    return (t->currentSpeed == targetSpeed);
 }
 
 bool matchDistance(struct Truck *t, int targetDistance)
 {
+    int distanceStep = 10;
 
-    t->currentDistance = targetDistance;
-    printf("Truck %d: Distance matched to %d\n", t->id, t->currentDistance);
+    pthread_mutex_lock(&truck_mutex);
 
-    return true;
+    if (t->currentDistance < targetDistance) {
+        t->currentDistance += distanceStep;
+        if (t->currentDistance > targetDistance)
+            t->currentDistance = targetDistance;
+    } else if (t->currentDistance > targetDistance) {
+        t->currentDistance -= distanceStep;
+        if (t->currentDistance < targetDistance)
+            t->currentDistance = targetDistance;
+    }
+
+    printf("\n Truck %d: Distance = %d\n", t->id, t->currentDistance);
+
+    pthread_mutex_unlock(&truck_mutex);
+    return (t->currentDistance == targetDistance);
 }
 
 void reportIntrusion(struct Truck *t)
 {
+    int speed = 20;
+    int step  = 5;
 
-    t->currentSpeed = 20;
-    printf("Truck %d: Intrusion detected! Speed reduced to %d\n", t->id, t->currentSpeed);
+    pthread_mutex_lock(&truck_mutex);
 
-    // char *msg = constructMessage(t->id, 1, t->currentSpeed, t->currentDistance, INTRUSION);
-    // if (msg == NULL)
-    // {
-    //     printf("reportIntrusion: constructMessage failed\n");
-    // }
-    // else
-    // {
-    //     printf("reportIntrusion: constructed message: %s", msg);
-    // }
+    if (t->currentSpeed > speed) {
+        t->currentSpeed -= step;
+        if (t->currentSpeed < speed){
+            t->currentSpeed = speed;
+        }
+        printf("Truck %d: Intrusion detected! Slowing down to %d\n",
+               t->id, t->currentSpeed);
+    }
+    else {
+        printf("Truck %d: Intrusion active. Speed stabilized at %d\n",
+               t->id, t->currentSpeed);
+    }
+
+    pthread_mutex_unlock(&truck_mutex);
 }
 
 void *TXthread(void* socketTXCopy){
     // construct a message()
     // SendMessage()
     // check Error in message()
-    int temp_case = INTRUSION;
+    SOCKET *SocketTX = (SOCKET *)socketTXCopy;
+
+    int temp_case      = SPEED;
+    int targetSpeed    = 80;
+    int targetDistance = 100;
+
     while(client_state == e_active){
-        SOCKET* SocketTX = (SOCKET*) socketTXCopy;
         char *msg = NULL;
-        switch (temp_case)
-        {
+
+        matchSpeed(&truck, targetSpeed);
+        matchDistance(&truck, targetDistance);
+
+        switch (temp_case){
         case INTRUSION:
+            reportIntrusion(&truck);
             msg = constructMessage(
                 truck.id,               // truck_id
-                e_read,                 // rw = write
-                0,                   // reporting intrusion
-                0,                   // reporting intrusion
+                e_write,                // rw = write
+                truck.currentSpeed,     // reporting intrusion
+                truck.currentDistance,  // reporting intrusion
                 INTRUSION               // eventType
             );
             temp_case = SPEED;
@@ -81,9 +124,9 @@ void *TXthread(void* socketTXCopy){
         case SPEED:
             msg = constructMessage(
                 truck.id,              // truck_id
-                e_read,                     // rw = write
-                0,    // reading speed
-                0, // reading speed
+                e_write,                     // rw = write
+                truck.currentSpeed,
+                truck.currentDistance,
                 SPEED              // eventType
             );
             temp_case = DISTANCE;
@@ -92,35 +135,46 @@ void *TXthread(void* socketTXCopy){
         case DISTANCE:
             msg = constructMessage(
                 truck.id,              // truck_id
-                e_read,               // rw = write
-                0,    // reading distance
-                0, // reading distance
+                e_write,               // rw = write
+                truck.currentSpeed,
+                truck.currentDistance,
                 DISTANCE              // eventType
             );
-            temp_case = -1;
+            temp_case = SPEED;
+            break;
+
+        case EMERGENCY_BRAKE:
+            msg = constructMessage(
+                truck.id,
+                e_write,
+                0,
+                truck.currentDistance,
+                EMERGENCY_BRAKE
+            );
             break;
 
         case CLIENT_LEFT:
             printf("\n Some client left");
-            DO_NOTHING
             break;
         default:
-            printf("\n TX - Undefined case");
-            closesocket(*SocketTX);
-            free(msg);
-            return NULL;
+            temp_case = SPEED;
+            printf("\n TX - default case");
+            continue;
+            // //TODO: CHECK THIS PART
+            // printf("\n TX - Undefined case");
+            // closesocket(*SocketTX);
+            // free(msg);
+            // return NULL;
         }
 
-        if (msg == NULL)
-        {
+        if (msg == NULL) {
             printf("Failed to construct frame message\n");
             closesocket(*SocketTX);
-            return (NULL);
+            return NULL;
         }
 
         int len = (int)strlen(msg);
         int bytesSent = send(*SocketTX, msg, len, 0);
-        free(msg);
 
         if (bytesSent == SOCKET_ERROR)
         {
@@ -133,6 +187,8 @@ void *TXthread(void* socketTXCopy){
             else
             {
                 printf("\n TX-Server disconnected\n");
+                free(msg);
+                client_state = e_kill;
                 closesocket(*SocketTX);
                 return (NULL);
             }
@@ -140,16 +196,18 @@ void *TXthread(void* socketTXCopy){
         else if (bytesSent == 0)
         {
             printf("\n TX-Server disconnected\n");
+            free(msg);
+            client_state = e_kill;
             closesocket(*SocketTX);
             WSACleanup();
         }
-        else
-        {
-            printf("\n Sent %d bytes: %d;%d;time;event;v;d ...\n", bytesSent, truck.id, truck.currentSpeed);
-        }
 
+        free(msg);
         sleep(5); // Sleep briefly to avoid busy-waiting
     }
+    
+    printf("TX thread exiting\n");
+    return NULL;
 }
 
 void *RXthread(void* socketRXCopy){
@@ -166,6 +224,11 @@ void *RXthread(void* socketRXCopy){
         {
             RXBuffer[bytesReceived] = '\0';
             receivedFrame = parseMessage(RXBuffer);
+
+            if (receivedFrame == NULL) {
+                printf("Invalid frame received\n");
+                continue;
+            }
         }
         if (bytesReceived == SOCKET_ERROR)
         {
@@ -207,6 +270,7 @@ void *RXthread(void* socketRXCopy){
                 break;
             case INTRUSION:
                 printf("\n Intrusion acknowledged");
+                reportIntrusion(&truck);
                 break;
             case LANE_CHANGE:
                 printf("\n Leader is changing lane");
@@ -220,7 +284,6 @@ void *RXthread(void* socketRXCopy){
             default:
                 printf("\n Undefined state");
         }
-
     }
     return NULL;
 }
@@ -249,8 +312,7 @@ int main(int argc, char *argv[])
 
     // Create socket
     clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == INVALID_SOCKET)
-    {
+    if (clientSocket == INVALID_SOCKET){
         printf("Failed to create socket.\n");
         WSACleanup();
         return 1;
@@ -307,5 +369,5 @@ int main(int argc, char *argv[])
     //kill exits loop & destroys sockets to end program.
     closesocket(clientSocket);
     WSACleanup();
-
+    return 0;
 }
