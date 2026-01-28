@@ -18,5 +18,14 @@
     ./client.exe 21
  ```
 
-- This 21 is the message we want to send, it can be of any value 'or' text. *[Ex: 21, Hello, etc.. ]*
+- This 21 is the message we want to send, it can be of any value 'or' text. *[Ex: 21, Hello, etc.. ]
+--- 
+# Changes
+28-01-2026
+- Including maximum no of clients=10
+- Client ID is not randomised, as each client joins - indivitual client id is assigned.
+- If a client leaves, its space will be empty. 
+- A new truck will reuse this ID now. New truck's position would be the max no of clients. 
+- ID of following trucks remains same. Position of its following trucks moves up. 
+  
 - Any number of cliets can be created (Max 40 clients)

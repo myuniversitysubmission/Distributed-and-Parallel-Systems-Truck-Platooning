@@ -16,22 +16,26 @@ typedef enum{
     e_active =1U }
 state;
 
-struct Truck truck;
-int SIGNAL_MAIN_THREAD = e_active;
+#define DO_NOTHING \
+    {              \
+        ;          \
+    }
 
+struct Truck truck;
+state client_state = e_active;
 
 bool matchSpeed(struct Truck *t, int targetSpeed)
 {
     t->currentSpeed = targetSpeed;
-    printf("Truck %d: Speed matched to %d\n", t->id, t->currentSpeed);
+    printf("\n Truck %d: Speed matched to %d\n", t->id, t->currentSpeed);
     return true;
 }
 
 bool matchDistance(struct Truck *t, int targetDistance)
 {
 
-    t->currentPosition = targetDistance;
-    printf("Truck %d: position matched to %d\n", t->id, t->currentPosition);
+    t->currentDistance = targetDistance;
+    printf("Truck %d: Distance matched to %d\n", t->id, t->currentDistance);
 
     return true;
 }
@@ -42,7 +46,7 @@ void reportIntrusion(struct Truck *t)
     t->currentSpeed = 20;
     printf("Truck %d: Intrusion detected! Speed reduced to %d\n", t->id, t->currentSpeed);
 
-    // char *msg = constructMessage(t->id, 1, t->currentSpeed, t->currentPosition, INTRUSION);
+    // char *msg = constructMessage(t->id, 1, t->currentSpeed, t->currentDistance, INTRUSION);
     // if (msg == NULL)
     // {
     //     printf("reportIntrusion: constructMessage failed\n");
@@ -58,7 +62,7 @@ void *TXthread(void* socketTXCopy){
     // SendMessage()
     // check Error in message()
     int temp_case = INTRUSION;
-    while(1){
+    while(client_state == e_active){
         SOCKET* SocketTX = (SOCKET*) socketTXCopy;
         char *msg = NULL;
         switch (temp_case)
@@ -93,11 +97,18 @@ void *TXthread(void* socketTXCopy){
                 0, // reading distance
                 DISTANCE              // eventType
             );
-            temp_case = 7;
+            temp_case = -1;
+            break;
+
+        case CLIENT_LEFT:
+            printf("\n Some client left");
+            DO_NOTHING
             break;
         default:
+            printf("\n TX - Undefined case");
+            closesocket(*SocketTX);
             free(msg);
-            break;
+            return NULL;
         }
 
         if (msg == NULL)
@@ -121,20 +132,20 @@ void *TXthread(void* socketTXCopy){
             }
             else
             {
-                printf("\n Server disconnected\n");
+                printf("\n TX-Server disconnected\n");
                 closesocket(*SocketTX);
                 return (NULL);
             }
         }
         else if (bytesSent == 0)
         {
-            printf("\n Server disconnected\n");
+            printf("\n TX-Server disconnected\n");
             closesocket(*SocketTX);
             WSACleanup();
         }
         else
         {
-            printf("Sent %d bytes: %d;%d;time;event;v;d ...\n", bytesSent, truck.id, truck.currentSpeed);
+            printf("\n Sent %d bytes: %d;%d;time;event;v;d ...\n", bytesSent, truck.id, truck.currentSpeed);
         }
 
         sleep(5); // Sleep briefly to avoid busy-waiting
@@ -146,7 +157,7 @@ void *RXthread(void* socketRXCopy){
     char RXBuffer[1024];
     DataFrame *receivedFrame;
 
-    while(1){
+    while(client_state == e_active){
         //(1) Receive message
         int bytesReceived = recv(*socketRX, RXBuffer, sizeof(RXBuffer) - 1, 0);
 
@@ -166,22 +177,28 @@ void *RXthread(void* socketRXCopy){
             }
             else
             {
-                printf("\n Server disconnected\n");
+                printf("\n RX-Server disconnected\n");
+                client_state = e_kill;
                 closesocket(*socketRX);
-
                 return NULL;
             }
             // real error
         }
         else if (bytesReceived == 0)
         {
-            printf("\n Server disconnected\n");
+            printf("\n RX-Server disconnected\n");
+            client_state = e_kill;
             closesocket(*socketRX);
             return NULL;
         }
         //(3) execute state_machine
 
         switch(receivedFrame->eventType){
+            case CLIENT_ID:
+                truck.id = receivedFrame->truck_id;
+                truck.position = receivedFrame->value;
+                printf("Received Truck ID = %u, Position = %u", truck.id, truck.position);
+                break;
             case SPEED:
                 matchSpeed(&truck, receivedFrame->value);
                 break;
@@ -197,17 +214,20 @@ void *RXthread(void* socketRXCopy){
             case LEADER_LEFT:
                 printf("\n Leader is leaving");
                 break;
+            case CLIENT_LEFT:
+                printf("\n Client %d left platoon", receivedFrame->param);
+                printf("\n Client %d-New position = %d ",truck.id,receivedFrame->value );
             default:
                 printf("\n Undefined state");
         }
 
     }
-
+    return NULL;
 }
 int main(int argc, char *argv[])
 {
 
-    state client_state = e_active;
+    client_state = e_active;
     WSADATA wsaData;
     SOCKET clientSocket;
     struct sockaddr_in serverAddr;
@@ -258,9 +278,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    truck.id = 1;
+    truck.id = 0;
     truck.currentSpeed = atoi(argv[1]); // Only for initialisation
-    truck.currentPosition = 0;  // TODO: get currentPosition from Server.
+    truck.currentDistance = 0;  // TODO: get currentDistance from Server.
     
     // create a seperate thread for TX & RX similar to Embedded systems
     // we do it seperately because, if leader election has to be integrated - then a code should have both follower & leader part inside it.
@@ -273,17 +293,16 @@ int main(int argc, char *argv[])
 
     pthread_t threadList[2];  
     
-    pthread_create(&threadList[0], NULL,TXthread, &clientSocket);
-    pthread_detach(threadList[0]);
-
     pthread_create(&threadList[1], NULL,RXthread, &clientSocket);
     pthread_detach(threadList[1]);
 
+    pthread_create(&threadList[0], NULL,TXthread, &clientSocket);
+    pthread_detach(threadList[0]);
+
     while (client_state == e_active)
     { 
-        //implement Follower/Leader
         // Kill logic
-        scanf("%d",&client_state);
+        sleep(5);        
     }
     //kill exits loop & destroys sockets to end program.
     closesocket(clientSocket);

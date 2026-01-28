@@ -34,7 +34,8 @@ struct ip_addr
 typedef struct s_clientInfo
 {
     SOCKET *socClient;
-    int client_id;
+    unsigned int client_id : 3;
+    unsigned int client_position : 3;
     TxQueue txQueue;
 } clientInfo;
 
@@ -42,11 +43,54 @@ typedef struct s_clientInfo
 #define PORT 8080
 #define NON_BLOCKING 1
 #define BLOCKING 0
+#define MAX_CLIENTS 7U
+#define SHUTDOWN 999U
+
+#define DO_NOTHING \
+    {              \
+        ;          \
+    }
 
 // Globals
 u_long mode = NON_BLOCKING;
 u_long modeConnection = BLOCKING;
-int id = 0;
+unsigned int g_followerCount = 0;
+clientInfo *g_clients[MAX_CLIENTS] = {0};
+
+// To find out free spots in the platoon
+int assignFreeID() {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_clients[i] == NULL) {
+            g_followerCount++;
+            return (i);
+        }
+    }
+    return -1;
+}
+
+// To inform all other clients if one client left the platoon. Used for clock matrix
+void broadcastClientLeft(unsigned int leftId) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_clients[i] != NULL && g_clients[i]->client_id != (leftId+1)) {
+            DataFrame *df = malloc(sizeof(DataFrame));
+            df->truck_id = g_clients[i]->client_id;
+            df->eventType = CLIENT_LEFT;
+            df->readWriteFlag = e_write;
+            df->param = leftId+1; // leftid
+            if(i > leftId){
+                printf("\nclient[%d], pos_existing = %d",g_clients[i]->client_id, g_clients[i]->client_position);
+                g_clients[i]->client_position = g_clients[i]->client_position - 1;
+                printf("\nclient[%d], pos_new = %d",g_clients[i]->client_id, g_clients[i]->client_position);
+
+            }
+            df->value = g_clients[i]->client_position; //new position
+            printf("\n i= %d, client_id=%d, leftID+1= %d, new_pos =%d, ",i,g_clients[i]->client_id, leftId+1, g_clients[i]->client_position);
+
+            TxQueue_push(&g_clients[i]->txQueue, df);
+        }
+    }
+}
+
 void *ServerRxHandler(void *clientInfoRxCopy)
 {
     char RXBuffer[1024];
@@ -77,7 +121,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 
         if (bytesReceived > 0)
         {
-            printf("\n Printing from %d : %s", tempArgument->client_id, RXBuffer);
+            printf("\n Printing from %u : %s", tempArgument->client_id, RXBuffer);
             receivedFrame = parseMessage(RXBuffer);
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
         }
@@ -91,7 +135,15 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             }
             else
             {
-                printf("\n Client disconnected\n");
+                int id = tempArgument->client_id;
+
+                printf("\n Client %d disconnected\n", id);
+                id--; // making id from normal terms to arrays
+                g_clients[id] = NULL; // remove from global list
+                g_followerCount--;    // reduce active count
+                receivedFrame->eventType = SHUTDOWN;
+                TxQueue_push(&tempArgument->txQueue, receivedFrame);
+                broadcastClientLeft(id); // broadcast to others
                 closesocket(*tempClient);
                 free(tempArgument->socClient);
                 free(tempArgument);
@@ -101,7 +153,16 @@ void *ServerRxHandler(void *clientInfoRxCopy)
         }
         else if (bytesReceived == 0)
         {
-            printf("\n Client disconnected\n");
+            int id = tempArgument->client_id;
+            
+            printf("\n Client %d disconnected\n", id);
+
+            id--;// making id from normal terms to arrays
+            g_clients[id] = NULL; // remove from global list
+            g_followerCount--;    // reduce active count
+            receivedFrame->eventType = SHUTDOWN;
+            TxQueue_push(&tempArgument->txQueue, receivedFrame);
+            broadcastClientLeft(id); // broadcast to others
             closesocket(*tempClient);
             free(tempArgument->socClient);
             free(tempArgument);
@@ -121,7 +182,9 @@ void *ServerTxHandler(void *clientInfoTxCopy)
         TxQueue_pop(&ci->txQueue, &msg);
 
         char *frame;
-
+        if (msg.eventType == SHUTDOWN) {
+            break;   // exit TX thread
+        }
         switch (msg.eventType)
         {
         case INTRUSION:
@@ -153,7 +216,18 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 DISTANCE       // eventType
             );
             break;
+
+        case CLIENT_LEFT:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                msg.param,     // id of the truck that left
+                msg.value,     // new position
+                CLIENT_LEFT    // 
+            );
+            break;
         default:
+            printf("\n Client ID - %d Undefined RX case", ci->client_id);
             break;
         }
 
@@ -163,6 +237,8 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             free(frame);
         }
     }
+    printf("Client RX thread destroyed");
+    return NULL;
 }
 
 void urgentBrakeAll(struct Truck *leader, SOCKET *clientSockets)
@@ -181,7 +257,7 @@ void urgentBrakeAll(struct Truck *leader, SOCKET *clientSockets)
         }
 
         char *msg = constructMessage(leader->id, 1, leader->currentSpeed,
-                                     leader->currentPosition, EMERGENCY_BRAKE);
+                                     leader->currentDistance, EMERGENCY_BRAKE);
 
         if (msg == NULL)
         {
@@ -201,7 +277,7 @@ int telematicComm(struct Truck *leader, SOCKET clientSocket, int speed, int dist
 {
 
     leader->currentSpeed = speed;
-    leader->currentPosition = distance;
+    leader->currentDistance = distance;
 
     char *msg = constructMessage(
         leader->id,
@@ -212,6 +288,7 @@ int telematicComm(struct Truck *leader, SOCKET clientSocket, int speed, int dist
 
     return 0;
 }
+
 
 int main()
 {
@@ -297,34 +374,54 @@ int main()
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK)
             {
-                // no new connection yet
-                continue;
+                DO_NOTHING // no new connection yet, continue to main thread
             }
-            printf("a 7 ccept failed: %d\n", err);
-            break;
+            else
+            {
+                printf("accept failed: %d\n", err);
+                break;
+            }
         }
         else
         {
+            int id = assignFreeID();
+            if (id == -1)
+            {
+                printf("Max clients reached\n");
+                closesocket(newSocket);
+                continue;
+            }
+
             // SOCKET *client = malloc(sizeof(SOCKET));
             // *client = newSocket;
-
             clientInfo *newClient = malloc(sizeof(clientInfo));
             newClient->socClient = malloc(sizeof(SOCKET));
             *(newClient->socClient) = newSocket;
-            newClient->client_id = id++;
+            g_clients[id] = newClient;   // for broadcasting
+            newClient->client_id = ++id;
+            printf("\n truck id= %d", id);
+            newClient->client_position = g_followerCount;
+            
+
             TxQueue_init(&newClient->txQueue);
+
+            // Publish client ID to client
+            char *clientIdFrame = constructMessage(newClient->client_id, e_write, newClient->client_id, newClient->client_position, CLIENT_ID);
+            send(newSocket, clientIdFrame, strlen(clientIdFrame), 0);
+            free(clientIdFrame);
 
             printf("New connection, socket fd is %d\n", newSocket);
             usleep(1000); // Sleep briefly to avoid busy-waiting
 
             pthread_t rxThread, txThread;
 
-            pthread_create(&rxThread, NULL, ServerRxHandler, (void *)newClient);
-            pthread_detach(rxThread);
-
             pthread_create(&txThread, NULL, ServerTxHandler, (void *)newClient);
             pthread_detach(txThread);
+
+            pthread_create(&rxThread, NULL, ServerRxHandler, (void *)newClient);
+            pthread_detach(rxThread);
         }
+        // main thread follows this (if any)
     }
 
     // Clean up

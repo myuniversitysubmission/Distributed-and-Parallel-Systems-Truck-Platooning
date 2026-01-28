@@ -12,7 +12,9 @@ typedef enum {
     JOIN_PLATOON = 4,
     LEAVE_PLATOON = 5,
     LANE_CHANGE = 6,
-    LEADER_LEFT = 7
+    LEADER_LEFT = 7,
+    CLIENT_ID = 8,
+    CLIENT_LEFT = 9
 } EventType;
 
 typedef enum
@@ -32,7 +34,7 @@ typedef struct {
 } DataFrame;
 
 
-char *constructMessage(int truck_id,
+char *constructMessage(unsigned int truck_id,
                        e_rw rw,
                        int param,
                        int value,

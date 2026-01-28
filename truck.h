@@ -3,9 +3,10 @@
 
 // Define Truck structure
 struct Truck {
-    int id;
+    unsigned int id : 3;
+    unsigned int position : 3;
     int currentSpeed;
-    int currentPosition;
+    int currentDistance;
 };
 
 #endif

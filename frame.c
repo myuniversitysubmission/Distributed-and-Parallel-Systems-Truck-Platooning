@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-char *constructMessage(int truck_id,
+char *constructMessage(unsigned int truck_id,
                        e_rw rw,
                        int param,
                        int value,
