@@ -24,6 +24,7 @@ state;
 struct Truck truck;
 volatile state client_state = e_active;
 pthread_mutex_t truck_mutex = PTHREAD_MUTEX_INITIALIZER;
+unsigned int g_followerCount = 0;
 
 bool matchSpeed(struct Truck *t, int targetSpeed)
 {
@@ -93,6 +94,7 @@ void reportIntrusion(struct Truck *t)
 }
 
 void *TXthread(void* socketTXCopy){
+    //(1) start point
     // construct a message()
     // SendMessage()
     // check Error in message()
@@ -153,7 +155,7 @@ void *TXthread(void* socketTXCopy){
             );
             break;
 
-        case CLIENT_LEFT:
+        case LEAVE_PLATOON:
             printf("\n Some client left");
             break;
         default:
@@ -211,6 +213,7 @@ void *TXthread(void* socketTXCopy){
 }
 
 void *RXthread(void* socketRXCopy){
+    // (4) Applying part
     SOCKET* socketRX = (SOCKET*) socketRXCopy;
     char RXBuffer[1024];
     DataFrame *receivedFrame;
@@ -278,7 +281,12 @@ void *RXthread(void* socketRXCopy){
             case LEADER_LEFT:
                 printf("\n Leader is leaving");
                 break;
-            case CLIENT_LEFT:
+            case JOIN_PLATOON:
+                g_followerCount = receivedFrame->value; // assign no of clients to new clients position
+                printf("\n New client %d has joined at Position %d", receivedFrame->param, receivedFrame->value);
+                break;
+            case LEAVE_PLATOON:
+                g_followerCount--; //reduce no of clients
                 printf("\n Client %d left platoon", receivedFrame->param);
                 printf("\n Client %d-New position = %d ",truck.id,receivedFrame->value );
             default:

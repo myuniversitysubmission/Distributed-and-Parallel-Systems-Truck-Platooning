@@ -58,30 +58,78 @@ int assignFreeID() {
     return -1;
 }
 
+void broadcastToOne(clientInfo *ci, EventType eventType, unsigned int truckId, unsigned int param,
+                    unsigned int value)
+{
+    DataFrame *df = malloc(sizeof(DataFrame));
+    df->truck_id = truckId;
+    df->eventType = eventType;
+    df->readWriteFlag = e_write;
+    df->param = param;
+    df->value = value;
+
+    TxQueue_push(&ci->txQueue, df);
+}
+
+void broadcastAll(EventType eventType, unsigned int param,
+                  unsigned int value)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_clients[i] != NULL) {
+            broadcastToOne(g_clients[i], eventType, g_clients[i]->client_id, param, value);
+        }
+    }
+}
+
+void broadcastClientLeft(EventType eventType, unsigned int leftId, unsigned int leftPosition)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        clientInfo *ci = g_clients[i];
+        if (ci == NULL || ci->client_id == leftId)
+            continue;
+
+        // Update position
+        if (ci->client_position > leftPosition)
+            ci->client_position--;
+
+        // Send customized message to THIS client
+        broadcastToOne(ci,
+                    eventType,
+                    ci->client_id,          // Current client
+                    leftId,                 // who left
+                    ci->client_position);   // THIS client's new position
+    }
+}
+
 // To inform all other clients if one client left the platoon. Used for clock matrix
-void broadcastClientLeft(unsigned int leftId, unsigned int leftPosition) {
+/*void broadcast_join_left(unsigned int leftId, unsigned int leftPosition) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_clients[i] != NULL && g_clients[i]->client_id != (leftId)) {
-            DataFrame *df = malloc(sizeof(DataFrame));
-            df->truck_id = g_clients[i]->client_id;
-            df->eventType = CLIENT_LEFT;
-            df->readWriteFlag = e_write;
-            df->param = leftId; // leftid
+
             if(g_clients[i]->client_position > leftPosition){
                 printf("\nclient[%d], pos_existing = %d",g_clients[i]->client_id, g_clients[i]->client_position);
                 g_clients[i]->client_position = g_clients[i]->client_position - 1;
                 printf("\nclient[%d], pos_new = %d",g_clients[i]->client_id, g_clients[i]->client_position);
             }
-            df->value = g_clients[i]->client_position; //new position
-            printf("\n i= %d, client_id=%d, leftID+1= %d, new_pos =%d, ",i,g_clients[i]->client_id, leftId+1, g_clients[i]->client_position);
+            // (event, left_client_id, client[i]_new_position)
+            // DataFrame *df = malloc(sizeof(DataFrame));
+            // df->truck_id = g_clients[i]->client_id;
+            // df->eventType = LEAVE_PLATOON;
+            // df->readWriteFlag = e_write;
+            // df->param = leftId; // leftid
 
-            TxQueue_push(&g_clients[i]->txQueue, df);
+            // df->value = g_clients[i]->client_position; //new position
+            // printf("\n i= %d, client_id=%d, leftID+1= %d, new_pos =%d, ",i,g_clients[i]->client_id, leftId+1, g_clients[i]->client_position);
+
+            // TxQueue_push(&g_clients[i]->txQueue, df);
         }
     }
-}
+}*/
 
 void *ServerRxHandler(void *clientInfoRxCopy)
 {
+    // (2) Check point
     char RXBuffer[1024];
     DataFrame *receivedFrame;
 
@@ -133,7 +181,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 g_followerCount--;    // reduce active count
                 receivedFrame->eventType = SHUTDOWN;
                 TxQueue_push(&tempArgument->txQueue, receivedFrame);
-                broadcastClientLeft(tempArgument->client_id,tempArgument->client_position); // broadcast to others
+                broadcastClientLeft(LEAVE_PLATOON, tempArgument->client_id, tempArgument->client_position); // broadcast to others
                 closesocket(*tempClient);
                 free(tempArgument->socClient);
                 free(tempArgument);
@@ -152,7 +200,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             g_followerCount--;    // reduce active count
             receivedFrame->eventType = SHUTDOWN;
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
-            broadcastClientLeft(tempArgument->client_id,tempArgument->client_position); // broadcast to others
+            broadcastClientLeft(LEAVE_PLATOON, tempArgument->client_id, tempArgument->client_position); // broadcast to others
             closesocket(*tempClient);
             free(tempArgument->socClient);
             free(tempArgument);
@@ -163,6 +211,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 
 void *ServerTxHandler(void *clientInfoTxCopy)
 {
+    // (3) Decision making
     clientInfo *ci = (clientInfo *)clientInfoTxCopy;
     SOCKET s = *(ci->socClient);
     DataFrame msg;
@@ -178,12 +227,13 @@ void *ServerTxHandler(void *clientInfoTxCopy)
         switch (msg.eventType)
         {
         case INTRUSION:
+        // processing 
             frame = constructMessage(
                 ci->client_id, 
                 e_write,       
                 msg.param,             
                 msg.value,            
-                INTRUSION      
+                msg.eventType      
             );
             break;
         case SPEED:
@@ -192,7 +242,7 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 e_write,       // rw = write
                 msg.param,             
                 msg.value,  
-                SPEED          // eventType
+                msg.eventType          // eventType
             );
             break;
 
@@ -202,17 +252,25 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 e_write,       // rw = write
                 msg.param,             
                 msg.value,  
-                DISTANCE       // eventType
+                msg.eventType       // eventType
             );
             break;
-
-        case CLIENT_LEFT:
+        case JOIN_PLATOON:
             frame = constructMessage(
                 ci->client_id, // truck_id
                 e_write,       // rw = write
                 msg.param,     // id of the truck that left
                 msg.value,     // new position
-                CLIENT_LEFT    // 
+                msg.eventType    // 
+            );
+            break;
+        case LEAVE_PLATOON:
+            frame = constructMessage(
+                ci->client_id, // truck_id
+                e_write,       // rw = write
+                msg.param,     // id of the truck that left
+                msg.value,     // new position
+                msg.eventType    // 
             );
             break;
         case EMERGENCY_BRAKE:
@@ -221,7 +279,7 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 e_write,       // rw = write
                 0,             // speed = 0
                 msg.value,           // reading distance
-                EMERGENCY_BRAKE // eventType
+                msg.eventType // eventType
             );
             break;
         default:
@@ -400,11 +458,12 @@ int main()
             
 
             TxQueue_init(&newClient->txQueue);
-
             // Publish client ID to client
             char *clientIdFrame = constructMessage(newClient->client_id, e_write, newClient->client_id, newClient->client_position, CLIENT_ID);
             send(newSocket, clientIdFrame, strlen(clientIdFrame), 0);
             free(clientIdFrame);
+
+            broadcastAll(JOIN_PLATOON, newClient->client_id, g_followerCount); // broadcast to others
 
             printf("New connection, socket fd is %d\n", newSocket);
             usleep(1000); // Sleep briefly to avoid busy-waiting
