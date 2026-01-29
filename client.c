@@ -11,10 +11,11 @@
 #include "frame.h"
 
 #pragma comment(lib, "Ws2_32.lib")
-typedef enum{
-    e_kill = 0U, 
-    e_active =1U }
-state;
+
+typedef enum {
+    e_kill   = 0U,
+    e_active = 1U
+} state;
 
 #define DO_NOTHING \
     {              \
@@ -24,7 +25,10 @@ state;
 struct Truck truck;
 volatile state client_state = e_active;
 pthread_mutex_t truck_mutex = PTHREAD_MUTEX_INITIALIZER;
-unsigned int g_followerCount = 0;
+
+// Global hedefler (server'dan gelen komutlarla değişecek)
+int g_targetSpeed    = 80;
+int g_targetDistance = 100;
 
 bool matchSpeed(struct Truck *t, int targetSpeed)
 {
@@ -79,13 +83,12 @@ void reportIntrusion(struct Truck *t)
 
     if (t->currentSpeed > speed) {
         t->currentSpeed -= step;
-        if (t->currentSpeed < speed){
+        if (t->currentSpeed < speed) {
             t->currentSpeed = speed;
         }
         printf("Truck %d: Intrusion detected! Slowing down to %d\n",
                t->id, t->currentSpeed);
-    }
-    else {
+    } else {
         printf("Truck %d: Intrusion active. Speed stabilized at %d\n",
                t->id, t->currentSpeed);
     }
@@ -93,80 +96,120 @@ void reportIntrusion(struct Truck *t)
     pthread_mutex_unlock(&truck_mutex);
 }
 
-void *TXthread(void* socketTXCopy){
-    //(1) start point
-    // construct a message()
-    // SendMessage()
-    // check Error in message()
+void *TXthread(void *socketTXCopy)
+{
     SOCKET *SocketTX = (SOCKET *)socketTXCopy;
 
-    int temp_case      = SPEED;
-    int targetSpeed    = 80;
-    int targetDistance = 100;
+    int  temp_case                 = SPEED;
+    bool intrusionReported         = false;
+    bool platoonStable             = false;
+    bool intrusionScenarioInjected = false;  // intrusion testi için "fizik" simulasyonu
+    bool emergencyReported         = false;  // emergency sadece bir kez raporlansın
 
-    while(client_state == e_active){
+    while (client_state == e_active) {
         char *msg = NULL;
 
-        matchSpeed(&truck, targetSpeed);
-        matchDistance(&truck, targetDistance);
+        // 1) Hedef hız/mesafeye doğru yürüt
+        bool speedOk    = matchSpeed(&truck, g_targetSpeed);
+        bool distanceOk = matchDistance(&truck, g_targetDistance);
 
-        switch (temp_case){
+        // 2) Platoon'un stabilize olduğu an
+        if (!platoonStable && speedOk && distanceOk) {
+            platoonStable = true;
+            printf("\n Truck %d: Platoon STABLE at speed=%d, distance=%d\n",
+                   truck.id, truck.currentSpeed, truck.currentDistance);
+        }
+
+        // 3) "Gerçek dünya" intrusion simulasyonu:
+        //    Platoon stable olduktan sonra, bir kere mesafeyi aniden düşür (araya araç girmiş gibi)
+        if (platoonStable && !intrusionScenarioInjected) {
+            pthread_mutex_lock(&truck_mutex);
+            truck.currentDistance = 10;   // intrusion tetiklenebilecek kadar yakın
+            pthread_mutex_unlock(&truck_mutex);
+
+            printf("\n Truck %d: SIMULATED PHYSICAL INTRUSION -> distance DROPPED to %d\n",
+                   truck.id, truck.currentDistance);
+
+            intrusionScenarioInjected = true;
+        }
+
+        // 4) EMERGENCY tetikleyici (daha kritik, önce kontrol et)
+        if (platoonStable && !emergencyReported && truck.currentDistance < 5) {
+            temp_case = EMERGENCY_BRAKE;
+        }
+        // 5) Normal intrusion tetikleyici
+        else if (platoonStable && !intrusionReported && truck.currentDistance < 30) {
+            temp_case = INTRUSION;
+        }
+
+        // 6) Frame seçimi ve gönderimi
+        switch (temp_case) {
         case INTRUSION:
+            // Lokal refleks: server cevabı gelene kadar hızını biraz düşür
             reportIntrusion(&truck);
+
             msg = constructMessage(
                 truck.id,               // truck_id
                 e_write,                // rw = write
-                truck.currentSpeed,     // reporting intrusion
-                truck.currentDistance,  // reporting intrusion
+                truck.currentSpeed,     // param: currentSpeed (server için telemetri)
+                truck.currentDistance,  // value: currentDistance
                 INTRUSION               // eventType
             );
-            temp_case = SPEED;
+            intrusionReported = true;   // intrusion sadece bir kez raporlanacak
+            temp_case = SPEED;          // sonraki loop'ta normal akışa dön
             break;
 
         case SPEED:
             msg = constructMessage(
-                truck.id,              // truck_id
-                e_write,                     // rw = write
+                truck.id,               // truck_id
+                e_write,                // rw = write
                 truck.currentSpeed,
                 truck.currentDistance,
-                SPEED              // eventType
+                SPEED                   // eventType
             );
             temp_case = DISTANCE;
             break;
 
         case DISTANCE:
             msg = constructMessage(
-                truck.id,              // truck_id
-                e_write,               // rw = write
+                truck.id,               // truck_id
+                e_write,                // rw = write
                 truck.currentSpeed,
                 truck.currentDistance,
-                DISTANCE              // eventType
+                DISTANCE                // eventType
             );
             temp_case = SPEED;
             break;
 
         case EMERGENCY_BRAKE:
+            // Lokal olarak hedef hızı 0'a çek
+            pthread_mutex_lock(&truck_mutex);
+            g_targetSpeed = 0;
+            pthread_mutex_unlock(&truck_mutex);
+
+            printf("\n Truck %d: LOCAL EMERGENCY TRIGGERED, reporting to server\n",
+                   truck.id);
+
             msg = constructMessage(
                 truck.id,
                 e_write,
-                0,
-                truck.currentDistance,
+                0,                      // param: speed=0 (bilgi amaçlı)
+                truck.currentDistance,  // value: o anki mesafe
                 EMERGENCY_BRAKE
             );
+            emergencyReported = true;   // bir kere raporla yeter
+            temp_case = SPEED;          // akış SPEED/DISTANCE ile devam eder (hedef hız 0)
             break;
 
-        case LEAVE_PLATOON:
+        case CLIENT_LEFT:
             printf("\n Some client left");
+            // şu an özel frame göndermiyoruz
             break;
+
         default:
             temp_case = SPEED;
             printf("\n TX - default case");
             continue;
-            // //TODO: CHECK THIS PART
-            // printf("\n TX - Undefined case");
-            // closesocket(*SocketTX);
-            // free(msg);
-            // return NULL;
         }
 
         if (msg == NULL) {
@@ -175,28 +218,21 @@ void *TXthread(void* socketTXCopy){
             return NULL;
         }
 
-        int len = (int)strlen(msg);
+        int len       = (int)strlen(msg);
         int bytesSent = send(*SocketTX, msg, len, 0);
 
-        if (bytesSent == SOCKET_ERROR)
-        {
+        if (bytesSent == SOCKET_ERROR) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK)
-            {
+            if (err == WSAEWOULDBLOCK) {
                 // no data yet, continue loop
-                // do_nothing
-            }
-            else
-            {
+            } else {
                 printf("\n TX-Server disconnected\n");
                 free(msg);
                 client_state = e_kill;
                 closesocket(*SocketTX);
-                return (NULL);
+                return NULL;
             }
-        }
-        else if (bytesSent == 0)
-        {
+        } else if (bytesSent == 0) {
             printf("\n TX-Server disconnected\n");
             free(msg);
             client_state = e_kill;
@@ -207,24 +243,23 @@ void *TXthread(void* socketTXCopy){
         free(msg);
         sleep(5); // Sleep briefly to avoid busy-waiting
     }
-    
+
     printf("TX thread exiting\n");
     return NULL;
 }
 
-void *RXthread(void* socketRXCopy){
-    // (4) Applying part
-    SOCKET* socketRX = (SOCKET*) socketRXCopy;
+void *RXthread(void *socketRXCopy)
+{
+    SOCKET *socketRX = (SOCKET *)socketRXCopy;
     char RXBuffer[1024];
     DataFrame *receivedFrame;
 
-    while(client_state == e_active){
+    while (client_state == e_active) {
         //(1) Receive message
         int bytesReceived = recv(*socketRX, RXBuffer, sizeof(RXBuffer) - 1, 0);
 
         //(2) parse message / check error in message
-        if (bytesReceived > 0)
-        {
+        if (bytesReceived > 0) {
             RXBuffer[bytesReceived] = '\0';
             receivedFrame = parseMessage(RXBuffer);
 
@@ -233,71 +268,80 @@ void *RXthread(void* socketRXCopy){
                 continue;
             }
         }
-        if (bytesReceived == SOCKET_ERROR)
-        {
+        if (bytesReceived == SOCKET_ERROR) {
             int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK)
-            {
+            if (err == WSAEWOULDBLOCK) {
                 // no data yet, continue loop
                 continue;
-            }
-            else
-            {
+            } else {
                 printf("\n RX-Server disconnected\n");
                 client_state = e_kill;
                 closesocket(*socketRX);
                 return NULL;
             }
-            // real error
-        }
-        else if (bytesReceived == 0)
-        {
+        } else if (bytesReceived == 0) {
             printf("\n RX-Server disconnected\n");
             client_state = e_kill;
             closesocket(*socketRX);
             return NULL;
         }
-        //(3) execute state_machine
 
-        switch(receivedFrame->eventType){
-            case CLIENT_ID:
-                truck.id = receivedFrame->truck_id;
-                truck.position = receivedFrame->value;
-                printf("Received Truck ID = %u, Position = %u", truck.id, truck.position);
-                break;
-            case SPEED:
-                matchSpeed(&truck, receivedFrame->value);
-                break;
-            case DISTANCE:
-                matchDistance(&truck, receivedFrame->value);
-                break;
-            case INTRUSION:
-                printf("\n Intrusion acknowledged");
-                reportIntrusion(&truck);
-                break;
-            case LANE_CHANGE:
-                printf("\n Leader is changing lane");
-                break;
-            case LEADER_LEFT:
-                printf("\n Leader is leaving");
-                break;
-            case JOIN_PLATOON:
-                g_followerCount = receivedFrame->value; // assign no of clients to new clients position
-                printf("\n New client %d has joined at Position %d", receivedFrame->param, receivedFrame->value);
-                break;
-            case LEAVE_PLATOON:
-                g_followerCount--; //reduce no of clients
-                printf("\n Client %d left platoon", receivedFrame->param);
-                printf("\n Client %d-New position = %d ",truck.id,receivedFrame->value );
-            default:
-                printf("\n Undefined state");
+        //(3) execute state_machine
+        switch (receivedFrame->eventType) {
+        case CLIENT_ID:
+            truck.id = receivedFrame->truck_id;
+            truck.position = receivedFrame->value;
+            printf("Received Truck ID = %u, Position = %u", truck.id, truck.position);
+            break;
+
+        case SPEED:
+            g_targetSpeed = receivedFrame->value;
+            printf("\n Truck %d: New target SPEED from server = %d\n",
+                   truck.id, g_targetSpeed);
+            break;
+
+        case DISTANCE:
+            g_targetDistance = receivedFrame->value;
+            printf("\n Truck %d: New target DISTANCE from server = %d\n",
+                   truck.id, g_targetDistance);
+            break;
+
+        case INTRUSION:
+            printf("\n Intrusion acknowledged");
+            break;
+
+        case EMERGENCY_BRAKE:
+            pthread_mutex_lock(&truck_mutex);
+            g_targetSpeed      = 0;  // hedef hız = 0
+            truck.currentSpeed = 0;  // anlık hız = 0
+            pthread_mutex_unlock(&truck_mutex);
+
+            printf("\n Truck %d: EMERGENCY BRAKE! Speed forced to 0\n", truck.id);
+            break;
+
+        case LANE_CHANGE:
+            printf("\n Leader is changing lane");
+            break;
+
+        case LEADER_LEFT:
+            printf("\n Leader is leaving");
+            break;
+
+        case CLIENT_LEFT:
+            printf("\n Client %d left platoon", receivedFrame->param);
+            printf("\n Client %d-New position = %d ", truck.id, receivedFrame->value);
+            // break eklemek istersen buraya ekleyebilirsin
+            // break;
+
+        default:
+            printf("\n Undefined state");
         }
     }
     return NULL;
 }
+
 int main(int argc, char *argv[])
 {
-
     client_state = e_active;
     WSADATA wsaData;
     SOCKET clientSocket;
@@ -305,22 +349,20 @@ int main(int argc, char *argv[])
     int port = 8080;
 
     // Check command line arguments
-    if (argc != 2)
-    {
+    if (argc != 2) {
         printf("Usage: %s <velocity>\n", argv[0]);
         return 1;
     }
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-    {
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         printf("Failed to initialize Winsock.\n");
         return 1;
     }
 
     // Create socket
     clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == INVALID_SOCKET){
+    if (clientSocket == INVALID_SOCKET) {
         printf("Failed to create socket.\n");
         WSACleanup();
         return 1;
@@ -331,8 +373,7 @@ int main(int argc, char *argv[])
     serverAddr.sin_port = htons(port);
     int result = inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
-    if (result <= 0)
-    {
+    if (result <= 0) {
         printf("Address not supported.\n");
         closesocket(clientSocket);
         WSACleanup();
@@ -340,40 +381,30 @@ int main(int argc, char *argv[])
     }
 
     // Connect to server
-    if (connect(clientSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
-    {
+    if (connect(clientSocket, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
         printf("Connection to server failed.\n", WSAGetLastError());
         closesocket(clientSocket);
         WSACleanup();
         return 1;
     }
 
-    truck.id = 0;
-    truck.currentSpeed = atoi(argv[1]); // Only for initialisation
-    truck.currentDistance = 0;  // TODO: get currentDistance from Server.
-    
-    // create a seperate thread for TX & RX similar to Embedded systems
-    // we do it seperately because, if leader election has to be integrated - then a code should have both follower & leader part inside it.
-    
-    // Deciding leader while starting - based on who starts first instance, the leader has to be decided.
-    // whoever joins next would be a follwoer & assigned an ID.
-    // Deciding leader in runtime - if current elader exits, it nominates the next immediate truck.
-    // that one truck alone, will close connection & start a socket, all others can join to that network again.
+    truck.id             = 0;
+    truck.currentSpeed   = atoi(argv[1]); // Only for initialisation
+    truck.currentDistance = 0;            // TODO: get currentDistance from Server.
 
+    pthread_t threadList[2];
 
-    pthread_t threadList[2];  
-    
-    pthread_create(&threadList[1], NULL,RXthread, &clientSocket);
+    pthread_create(&threadList[1], NULL, RXthread, &clientSocket);
     pthread_detach(threadList[1]);
 
-    pthread_create(&threadList[0], NULL,TXthread, &clientSocket);
+    pthread_create(&threadList[0], NULL, TXthread, &clientSocket);
     pthread_detach(threadList[0]);
 
-    while (client_state == e_active)
-    { 
+    while (client_state == e_active) {
         // Kill logic
-        sleep(5);        
+        sleep(5);
     }
+
     //kill exits loop & destroys sockets to end program.
     closesocket(clientSocket);
     WSACleanup();

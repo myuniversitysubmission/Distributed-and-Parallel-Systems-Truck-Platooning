@@ -15,6 +15,7 @@ typedef enum {
     LANE_CHANGE = 6,
     LEADER_LEFT = 7,
     CLIENT_ID = 8,
+    CLIENT_LEFT = 9
 } EventType;
 
 typedef enum
