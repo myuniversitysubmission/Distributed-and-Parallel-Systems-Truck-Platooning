@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <windows.h>    // for QueryPerformanceCounter
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <unistd.h>
@@ -30,7 +31,7 @@ typedef struct s_clientInfo
 } clientInfo;
 
 // Macros
-#define PORT        8080
+#define PORT         8080
 #define NON_BLOCKING 1
 #define BLOCKING     0
 #define MAX_CLIENTS  7U
@@ -46,6 +47,20 @@ u_long mode           = NON_BLOCKING;
 u_long modeConnection = BLOCKING;
 unsigned int g_followerCount = 0;
 clientInfo *g_clients[MAX_CLIENTS] = {0};
+
+// High-resolution timer globals (for WCET measurement)
+LARGE_INTEGER g_perfFreq;
+double g_max_rx_ms    = 0.0;
+double g_max_tx_ms    = 0.0;
+double g_max_emerg_ms = 0.0;
+
+// Helper: current time in milliseconds (high resolution)
+static double now_ms(void)
+{
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart * 1000.0 / (double)g_perfFreq.QuadPart;
+}
 
 // To find out free spots in the platoon
 int assignFreeID(void)
@@ -70,17 +85,17 @@ void broadcastClientLeft(unsigned int leftId, unsigned int leftPosition)
             df->truck_id      = g_clients[i]->client_id;
             df->eventType     = CLIENT_LEFT;
             df->readWriteFlag = e_write;
-            df->param         = leftId; // left id
+            df->param         = leftId; // ID of the truck that left
 
             if (g_clients[i]->client_position > leftPosition) {
-                printf("\nclient[%d], pos_existing = %d",
+                printf("\n[INFO] Client[%d], old position = %d",
                        g_clients[i]->client_id, g_clients[i]->client_position);
                 g_clients[i]->client_position = g_clients[i]->client_position - 1;
-                printf("\nclient[%d], pos_new = %d",
+                printf("\n[INFO] Client[%d], new position = %d",
                        g_clients[i]->client_id, g_clients[i]->client_position);
             }
             df->value = g_clients[i]->client_position; // new position
-            printf("\n i= %d, client_id=%d, leftID+1= %d, new_pos =%d, ",
+            printf("\n[INFO] i = %d, client_id = %d, leftID+1 = %d, new_pos = %d",
                    i, g_clients[i]->client_id, leftId + 1, g_clients[i]->client_position);
 
             TxQueue_push(&g_clients[i]->txQueue, df);
@@ -96,40 +111,57 @@ void *ServerRxHandler(void *clientInfoRxCopy)
     clientInfo *tempArgument = (clientInfo *)clientInfoRxCopy;
     SOCKET *tempClient       = tempArgument->socClient;
     if (*tempClient == INVALID_SOCKET) {
-        printf("Accept failed.\n");
+        printf("[ERROR] Accept failed.\n");
         closesocket(*tempClient);
         return NULL;
     }
     // Set the client socket to non-blocking mode
     if (ioctlsocket(*tempClient, FIONBIO, &modeConnection) < 0) {
-        perror("fcntl failed");
+        perror("[ERROR] ioctlsocket failed");
         closesocket(*tempClient);
         exit(EXIT_FAILURE);
     }
 
-    printf("Client connected.\n");
+    printf("[INFO] Client connected (ID = %u).\n", tempArgument->client_id);
     memset(RXBuffer, 0, sizeof(RXBuffer));
 
     while (1) {
         int bytesReceived = recv(*tempClient, RXBuffer, sizeof(RXBuffer) - 1, 0);
 
         if (bytesReceived > 0) {
-            printf("\n Printing from %u : %s", tempArgument->client_id, RXBuffer);
+            double start_ms = now_ms();   // start RX job timing
+
+            printf("\n[RX] From client %u : %s", tempArgument->client_id, RXBuffer);
 
             receivedFrame = parseMessage(RXBuffer);
             if (!receivedFrame) {
+                double end_ms = now_ms();
+                double elapsed_ms = end_ms - start_ms;
+                if (elapsed_ms > g_max_rx_ms) {
+                    g_max_rx_ms = elapsed_ms;
+                }
+                printf("[WCET DEBUG] RX job (parse fail) took %.6f ms (max so far = %.6f ms)\n",
+                       elapsed_ms, g_max_rx_ms);
                 continue;
             }
 
             /* --- EMERGENCY_BRAKE HANDLING --- */
             if (receivedFrame->eventType == EMERGENCY_BRAKE) {
-                printf("\n EMERGENCY_BRAKE received from client %u\n",
+                printf("\n[INFO] EMERGENCY_BRAKE received from client %u\n",
                        tempArgument->client_id);
 
-                urgentBrakeAll();   // tüm client'lere emergency brake yayınla
+                urgentBrakeAll();   // broadcast emergency brake to all clients
 
                 free(receivedFrame);
                 receivedFrame = NULL;
+
+                double end_ms = now_ms();
+                double elapsed_ms = end_ms - start_ms;
+                if (elapsed_ms > g_max_rx_ms) {
+                    g_max_rx_ms = elapsed_ms;
+                }
+                printf("[WCET DEBUG] RX job (EMERGENCY_BRAKE) took %.6f ms (max so far = %.6f ms)\n",
+                       elapsed_ms, g_max_rx_ms);
                 continue;
             }
 
@@ -138,21 +170,21 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 int reportedSpeed = receivedFrame->param;   // client currentSpeed
                 int reportedDist  = receivedFrame->value;   // client currentDistance
 
-                // Basit politika: hızı düşür, mesafeyi artır
+                // Simple policy: decrease speed, increase distance
                 int safeSpeed = reportedSpeed - 20;
                 if (safeSpeed < 20) {
-                    safeSpeed = 20;  // minimum hız
+                    safeSpeed = 20;  // minimum speed
                 }
-                int safeDist = reportedDist + 50;  // mesafeyi aç
+                int safeDist = reportedDist + 50;  // increase distance
 
-                // Çok kritik mesafe ise emergency de tetikleyebilirsin
+                // Critical distance => also trigger emergency brake
                 if (reportedDist < 5) {
-                    printf("\n CRITICAL intrusion from client %u, triggering EMERGENCY BRAKE\n",
+                    printf("\n[WARN] CRITICAL intrusion from client %u, triggering EMERGENCY BRAKE\n",
                            tempArgument->client_id);
                     urgentBrakeAll();
                 }
 
-                // 1) SPEED komutu
+                // 1) SPEED command
                 DataFrame *speedCmd = (DataFrame *)malloc(sizeof(DataFrame));
                 if (speedCmd) {
                     speedCmd->truck_id      = tempArgument->client_id;
@@ -163,7 +195,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                     TxQueue_push(&tempArgument->txQueue, speedCmd);
                 }
 
-                // 2) DISTANCE komutu
+                // 2) DISTANCE command
                 DataFrame *distCmd = (DataFrame *)malloc(sizeof(DataFrame));
                 if (distCmd) {
                     distCmd->truck_id      = tempArgument->client_id;
@@ -176,20 +208,43 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 
                 free(receivedFrame);
                 receivedFrame = NULL;
+
+                double end_ms = now_ms();
+                double elapsed_ms = end_ms - start_ms;
+                if (elapsed_ms > g_max_rx_ms) {
+                    g_max_rx_ms = elapsed_ms;
+                }
+                printf("[WCET DEBUG] RX job (INTRUSION) took %.6f ms (max so far = %.6f ms)\n",
+                       elapsed_ms, g_max_rx_ms);
                 continue;
             }
 
-            /* --- SPEED / DISTANCE: sadece telemetri, geri yollama --- */
+            /* --- SPEED / DISTANCE: telemetry only, do not echo back --- */
             if (receivedFrame->eventType == SPEED || receivedFrame->eventType == DISTANCE) {
-                // Telemetry only, don't echo back
                 free(receivedFrame);
                 receivedFrame = NULL;
+
+                double end_ms = now_ms();
+                double elapsed_ms = end_ms - start_ms;
+                if (elapsed_ms > g_max_rx_ms) {
+                    g_max_rx_ms = elapsed_ms;
+                }
+                printf("[WCET DEBUG] RX job (telemetry) took %.6f ms (max so far = %.6f ms)\n",
+                       elapsed_ms, g_max_rx_ms);
                 continue;
             }
 
-            /* --- Diğer event'ler normal şekilde TX kuyruğuna --- */
+            /* --- Other events: push to TX queue --- */
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
             receivedFrame = NULL;
+
+            double end_ms = now_ms();
+            double elapsed_ms = end_ms - start_ms;
+            if (elapsed_ms > g_max_rx_ms) {
+                g_max_rx_ms = elapsed_ms;
+            }
+            printf("[WCET DEBUG] RX job (other) took %.6f ms (max so far = %.6f ms)\n",
+                   elapsed_ms, g_max_rx_ms);
         }
 
         if (bytesReceived == SOCKET_ERROR) {
@@ -200,8 +255,8 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             } else {
                 int id = tempArgument->client_id;
 
-                printf("\n Client %d disconnected\n", id);
-                id--; // making id from normal terms to arrays
+                printf("\n[INFO] Client %d disconnected (SOCKET_ERROR)\n", id);
+                id--; // convert to array index
                 g_clients[id] = NULL; // remove from global list
                 g_followerCount--;    // reduce active count
 
@@ -226,9 +281,9 @@ void *ServerRxHandler(void *clientInfoRxCopy)
         } else if (bytesReceived == 0) {
             int id = tempArgument->client_id;
 
-            printf("\n Client %d disconnected\n", id);
+            printf("\n[INFO] Client %d disconnected (graceful)\n", id);
 
-            id--; // making id from normal terms to arrays
+            id--; // convert to array index
             g_clients[id] = NULL; // remove from global list
             g_followerCount--;    // reduce active count
 
@@ -262,8 +317,17 @@ void *ServerTxHandler(void *clientInfoTxCopy)
     while (1) {
         TxQueue_pop(&ci->txQueue, &msg);
 
+        double start_ms = now_ms();  // start TX job timing
+
         char *frame;
         if (msg.eventType == SHUTDOWN) {
+            double end_ms = now_ms();
+            double elapsed_ms = end_ms - start_ms;
+            if (elapsed_ms > g_max_tx_ms) {
+                g_max_tx_ms = elapsed_ms;
+            }
+            printf("[WCET DEBUG] TX job (SHUTDOWN) took %.6f ms (max so far = %.6f ms)\n",
+                   elapsed_ms, g_max_tx_ms);
             break;   // exit TX thread
         }
 
@@ -319,7 +383,8 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             break;
 
         default:
-            printf("\n Client ID - %d Undefined RX case", ci->client_id);
+            printf("\n[WARN] Client ID %d: undefined TX eventType %d",
+                   ci->client_id, msg.eventType);
             frame = NULL;
             break;
         }
@@ -328,14 +393,27 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             send(s, frame, (int)strlen(frame), 0);
             free(frame);
         }
+
+        double end_ms = now_ms();
+        double elapsed_ms = end_ms - start_ms;
+        if (elapsed_ms > g_max_tx_ms) {
+            g_max_tx_ms = elapsed_ms;
+        }
+
+        printf("[WCET DEBUG] TX job took %.6f ms (max so far = %.6f ms)\n",
+               elapsed_ms, g_max_tx_ms);
     }
+    printf("[INFO] TX thread for client %d terminated. Estimated WCET per message = %.6f ms\n",
+           ci->client_id, g_max_tx_ms);
     printf("Client RX thread destroyed");
     return NULL;
 }
 
 void urgentBrakeAll(void)
 {
-    printf("Urgent brake applied to ALL clients!\n");
+    double start_ms = now_ms();   // start emergency task timing
+
+    printf("[WARN] Urgent brake is being applied to ALL clients!\n");
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_clients[i] == NULL) {
@@ -351,20 +429,35 @@ void urgentBrakeAll(void)
         df->eventType     = EMERGENCY_BRAKE;
         df->readWriteFlag = e_write;
         df->param         = 0;   // speed = 0
-        df->value         = 0;   // extra info istersen doldur
+        df->value         = 0;   // extra info if needed
 
         TxQueue_push(&g_clients[i]->txQueue, df);
     }
+
+    double end_ms = now_ms();
+    double elapsed_ms = end_ms - start_ms;
+    if (elapsed_ms > g_max_emerg_ms) {
+        g_max_emerg_ms = elapsed_ms;
+    }
+
+    printf("[WCET DEBUG] urgentBrakeAll took %.6f ms (max so far = %.6f ms)\n",
+           elapsed_ms, g_max_emerg_ms);
 }
 
 
 int main(void)
 {
 #ifndef USE_LINUX
+    // high-resolution timer initialization
+    if (!QueryPerformanceFrequency(&g_perfFreq)) {
+        printf("[ERROR] High-resolution performance counter not supported.\n");
+        return 1;
+    }
+
     // winsocket initialisation
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("Failed to initialize Winsock.\n");
+        printf("[ERROR] Failed to initialize Winsock.\n");
         return 1;
     }
 #endif
@@ -379,7 +472,7 @@ int main(void)
 
     // 1. Socket creation
     if ((server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == INVALID_SOCKET) {
-        printf("Failed to create socket.\n");
+        printf("[ERROR] Failed to create socket.\n");
 #ifndef USE_LINUX
         WSACleanup();
 #endif
@@ -388,7 +481,7 @@ int main(void)
 
     // 2. Binding socket to an address
     if (bind(server_fd, (struct sockaddr *)&server_addr, addr_len) == SOCKET_ERROR) {
-        printf("Bind failed.\n");
+        printf("[ERROR] Bind failed.\n");
         closesocket(server_fd);
 #ifndef USE_LINUX
         WSACleanup();
@@ -398,20 +491,22 @@ int main(void)
 
     // Set the server socket to non-blocking mode
     if (ioctlsocket(server_fd, FIONBIO, &mode) < 0) {
-        perror("fcntl failed");
+        perror("[ERROR] ioctlsocket failed");
         closesocket(server_fd);
         exit(EXIT_FAILURE);
     }
 
     // 3. Listen for incoming connections
     if (listen(server_fd, 40) == SOCKET_ERROR) {
-        printf("Listen failed.\n");
+        printf("[ERROR] Listen failed.\n");
         closesocket(server_fd);
+#ifndef USE_LINUX
         WSACleanup();
+#endif
         return 1;
     }
 
-    printf("Server is listening on port %d...\n", PORT);
+    printf("[INFO] Server is listening on port %d...\n", PORT);
 
     while (1) {
         newSocket = accept(server_fd, (struct sockaddr *)&clientAddr, &addr_len);
@@ -420,23 +515,23 @@ int main(void)
             if (err == WSAEWOULDBLOCK) {
                 DO_NOTHING // no new connection yet, continue to main loop
             } else {
-                printf("accept failed: %d\n", err);
+                printf("[ERROR] accept failed: %d\n", err);
                 break;
             }
         } else {
             int id = assignFreeID();
             if (id == -1) {
-                printf("Max clients reached\n");
+                printf("[WARN] Max clients reached, rejecting new connection\n");
                 closesocket(newSocket);
                 continue;
             }
 
-            clientInfo *newClient  = (clientInfo *)malloc(sizeof(clientInfo));
-            newClient->socClient   = (SOCKET *)malloc(sizeof(SOCKET));
+            clientInfo *newClient   = (clientInfo *)malloc(sizeof(clientInfo));
+            newClient->socClient    = (SOCKET *)malloc(sizeof(SOCKET));
             *(newClient->socClient) = newSocket;
             g_clients[id]           = newClient;   // for broadcasting
             newClient->client_id    = ++id;
-            printf("\n truck id= %d", id);
+            printf("\n[INFO] New truck connected, assigned ID = %d", id);
             newClient->client_position = g_followerCount;
 
             TxQueue_init(&newClient->txQueue);
@@ -452,7 +547,7 @@ int main(void)
             send(newSocket, clientIdFrame, (int)strlen(clientIdFrame), 0);
             free(clientIdFrame);
 
-            printf("New connection, socket fd is %d\n", newSocket);
+            printf("\n[INFO] New connection, socket fd is %d\n", newSocket);
             usleep(1000); // Sleep briefly to avoid busy-waiting
 
             pthread_t rxThread, txThread;
@@ -465,9 +560,17 @@ int main(void)
         }
     }
 
+    // Print final WCET estimates before shutdown
+    printf("\n[RESULT] Estimated WCETs (based on max measured values):\n");
+    printf("         RX handler per frame      : %.6f ms\n", g_max_rx_ms);
+    printf("         TX handler per message    : %.6f ms\n", g_max_tx_ms);
+    printf("         urgentBrakeAll (broadcast): %.6f ms\n", g_max_emerg_ms);
+
     // Clean up
     closesocket(server_fd);
+#ifndef USE_LINUX
     WSACleanup();
+#endif
 
     return 0;
 }
