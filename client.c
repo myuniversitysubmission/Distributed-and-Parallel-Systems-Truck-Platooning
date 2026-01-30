@@ -134,7 +134,7 @@ void *TXthread(void *socketTXCopy)
         }
 
         // 4) EMERGENCY tetikleyici (daha kritik, önce kontrol et)
-        if (platoonStable && !emergencyReported && truck.currentDistance < 5) {
+        if (platoonStable && !emergencyReported && truck.currentDistance < 20) {
             temp_case = EMERGENCY_BRAKE;
         }
         // 5) Normal intrusion tetikleyici
