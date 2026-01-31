@@ -19,7 +19,7 @@
 ```
 **To run test suit:**
 ```
-    gcc -Iinclude src/frame.c tests/val_tests.c -o val_test -lcunit
+    gcc -Iinclude src/frame.c src/queue.c  tests/tests.c -o test -lcunit 
 ```
 - This 21 is the message we want to send, it can be of any value 'or' text. *[Ex: 21, Hello, etc.. ]
 --- 
