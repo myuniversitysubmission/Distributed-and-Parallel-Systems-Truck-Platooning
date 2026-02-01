@@ -343,7 +343,7 @@ void *RXthread(void *socketRXCopy)
     return NULL;
 }
 
-
+#if defined(BUILD_CLIENT)
 int main(int argc, char *argv[])
 {
     client_state = e_active;
@@ -414,4 +414,5 @@ int main(int argc, char *argv[])
     WSACleanup();
     return 0;
 }
+#endif
 

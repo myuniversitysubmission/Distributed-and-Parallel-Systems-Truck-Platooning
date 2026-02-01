@@ -450,7 +450,7 @@ void urgentBrakeAll(void)
 }
 
 
-
+#if defined(BUILD_SERVER)
 int main(void)
 {
 #ifndef USE_LINUX
@@ -580,3 +580,5 @@ int main(void)
 
     return 0;
 }
+
+#endif // end of build_server
