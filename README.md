@@ -18,7 +18,6 @@
     ./client.exe 21
 ```
 - This 21 is the message we want to send, it can be of any value 'or' text. *[Ex: 21, Hello, etc.. ]
---- 
 
 **To run test suit:**
 ```
