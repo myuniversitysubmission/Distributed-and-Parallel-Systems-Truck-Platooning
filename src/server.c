@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <windows.h>    // for QueryPerformanceCounter
 #include <winsock2.h>
+#include <windows.h>    // for QueryPerformanceCounter
 #include <ws2tcpip.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -103,6 +103,44 @@ void broadcastClientLeft(unsigned int leftId, unsigned int leftPosition)
     }
 }
 
+void server_handle_intrusion(clientInfo *tempArgument, DataFrame *receivedFrame)
+{
+    int reportedSpeed = receivedFrame->param;   // client currentSpeed
+    int reportedDist  = receivedFrame->value;   // client currentDistance
+
+    int safeSpeed = reportedSpeed - 20;
+    if (safeSpeed < 20) {
+        safeSpeed = 20;  // minimum speed
+    }
+    int safeDist = reportedDist + 50;  // increase distance
+
+    if (reportedDist < 5) {
+        //printf("\n[WARN] CRITICAL intrusion from client %u, triggering EMERGENCY BRAKE\n",
+               //tempArgument->client_id);
+        urgentBrakeAll();
+    }
+
+    DataFrame *speedCmd = (DataFrame *)malloc(sizeof(DataFrame));
+    if (speedCmd) {
+        speedCmd->truck_id      = tempArgument->client_id;
+        speedCmd->eventType     = SPEED;
+        speedCmd->readWriteFlag = e_write;
+        speedCmd->param         = 0;
+        speedCmd->value         = safeSpeed;
+        TxQueue_push(&tempArgument->txQueue, speedCmd);
+    }
+
+    DataFrame *distCmd = (DataFrame *)malloc(sizeof(DataFrame));
+    if (distCmd) {
+        distCmd->truck_id      = tempArgument->client_id;
+        distCmd->eventType     = DISTANCE;
+        distCmd->readWriteFlag = e_write;
+        distCmd->param         = 0;
+        distCmd->value         = safeDist;
+        TxQueue_push(&tempArgument->txQueue, distCmd);
+    }
+}
+
 void *ServerRxHandler(void *clientInfoRxCopy)
 {
     char RXBuffer[1024];
@@ -167,45 +205,8 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 
             /* --- INTRUSION HANDLING --- */
             if (receivedFrame->eventType == INTRUSION) {
-                int reportedSpeed = receivedFrame->param;   // client currentSpeed
-                int reportedDist  = receivedFrame->value;   // client currentDistance
-
-                // Simple policy: decrease speed, increase distance
-                int safeSpeed = reportedSpeed - 20;
-                if (safeSpeed < 20) {
-                    safeSpeed = 20;  // minimum speed
-                }
-                int safeDist = reportedDist + 50;  // increase distance
-
-                // Critical distance => also trigger emergency brake
-                if (reportedDist < 5) {
-                    printf("\n[WARN] CRITICAL intrusion from client %u, triggering EMERGENCY BRAKE\n",
-                           tempArgument->client_id);
-                    urgentBrakeAll();
-                }
-
-                // 1) SPEED command
-                DataFrame *speedCmd = (DataFrame *)malloc(sizeof(DataFrame));
-                if (speedCmd) {
-                    speedCmd->truck_id      = tempArgument->client_id;
-                    speedCmd->eventType     = SPEED;
-                    speedCmd->readWriteFlag = e_write;
-                    speedCmd->param         = 0;
-                    speedCmd->value         = safeSpeed;
-                    TxQueue_push(&tempArgument->txQueue, speedCmd);
-                }
-
-                // 2) DISTANCE command
-                DataFrame *distCmd = (DataFrame *)malloc(sizeof(DataFrame));
-                if (distCmd) {
-                    distCmd->truck_id      = tempArgument->client_id;
-                    distCmd->eventType     = DISTANCE;
-                    distCmd->readWriteFlag = e_write;
-                    distCmd->param         = 0;
-                    distCmd->value         = safeDist;
-                    TxQueue_push(&tempArgument->txQueue, distCmd);
-                }
-
+                
+                server_handle_intrusion(tempArgument, receivedFrame);
                 free(receivedFrame);
                 receivedFrame = NULL;
 
@@ -315,7 +316,10 @@ void *ServerTxHandler(void *clientInfoTxCopy)
     DataFrame msg;
 
     while (1) {
-        TxQueue_pop(&ci->txQueue, &msg);
+        if (!TxQueue_pop(&ci->txQueue, &msg)) {
+            usleep(1000);  // 1 ms
+            continue;
+        }
 
         double start_ms = now_ms();  // start TX job timing
 
@@ -328,7 +332,7 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             }
             printf("[WCET DEBUG] TX job (SHUTDOWN) took %.6f ms (max so far = %.6f ms)\n",
                    elapsed_ms, g_max_tx_ms);
-            break;   // exit TX thread
+            break; 
         }
 
         switch (msg.eventType) {
@@ -344,40 +348,40 @@ void *ServerTxHandler(void *clientInfoTxCopy)
 
         case SPEED:
             frame = constructMessage(
-                ci->client_id, // truck_id
-                e_write,       // rw = write
+                ci->client_id,
+                e_write,
                 msg.param,
                 msg.value,
-                SPEED          // eventType
+                SPEED
             );
             break;
 
         case DISTANCE:
             frame = constructMessage(
-                ci->client_id, // truck_id
-                e_write,       // rw = write
+                ci->client_id,
+                e_write,
                 msg.param,
                 msg.value,
-                DISTANCE       // eventType
+                DISTANCE
             );
             break;
 
         case CLIENT_LEFT:
             frame = constructMessage(
-                ci->client_id, // truck_id
-                e_write,       // rw = write
-                msg.param,     // id of the truck that left
-                msg.value,     // new position
+                ci->client_id,
+                e_write,
+                msg.param,
+                msg.value,
                 CLIENT_LEFT
             );
             break;
 
         case EMERGENCY_BRAKE:
             frame = constructMessage(
-                ci->client_id, // truck_id
-                e_write,       // rw = write
-                0,             // speed = 0
-                msg.value,     // distance or extra info
+                ci->client_id,
+                e_write,
+                0,
+                msg.value,
                 EMERGENCY_BRAKE
             );
             break;
@@ -409,11 +413,12 @@ void *ServerTxHandler(void *clientInfoTxCopy)
     return NULL;
 }
 
+
 void urgentBrakeAll(void)
 {
     double start_ms = now_ms();   // start emergency task timing
 
-    printf("[WARN] Urgent brake is being applied to ALL clients!\n");
+    //printf("[WARN] Urgent brake is being applied to ALL clients!\n");
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_clients[i] == NULL) {
@@ -440,11 +445,12 @@ void urgentBrakeAll(void)
         g_max_emerg_ms = elapsed_ms;
     }
 
-    printf("[WCET DEBUG] urgentBrakeAll took %.6f ms (max so far = %.6f ms)\n",
-           elapsed_ms, g_max_emerg_ms);
+    //printf("[WCET DEBUG] urgentBrakeAll took %.6f ms (max so far = %.6f ms)\n",
+          // elapsed_ms, g_max_emerg_ms);
 }
 
 
+/*
 int main(void)
 {
 #ifndef USE_LINUX
@@ -573,4 +579,4 @@ int main(void)
 #endif
 
     return 0;
-}
+}*/

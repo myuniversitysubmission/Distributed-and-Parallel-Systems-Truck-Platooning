@@ -248,6 +248,14 @@ void *TXthread(void *socketTXCopy)
     return NULL;
 }
 
+void client_apply_emergency_brake(void)
+{
+    pthread_mutex_lock(&truck_mutex);
+    g_targetSpeed      = 0;
+    truck.currentSpeed = 0;
+    pthread_mutex_unlock(&truck_mutex);
+}
+
 void *RXthread(void *socketRXCopy)
 {
     SOCKET *socketRX = (SOCKET *)socketRXCopy;
@@ -311,11 +319,6 @@ void *RXthread(void *socketRXCopy)
             break;
 
         case EMERGENCY_BRAKE:
-            pthread_mutex_lock(&truck_mutex);
-            g_targetSpeed      = 0;  // hedef hız = 0
-            truck.currentSpeed = 0;  // anlık hız = 0
-            pthread_mutex_unlock(&truck_mutex);
-
             printf("\n Truck %d: EMERGENCY BRAKE! Speed forced to 0\n", truck.id);
             break;
 
@@ -340,6 +343,7 @@ void *RXthread(void *socketRXCopy)
     return NULL;
 }
 
+/*
 int main(int argc, char *argv[])
 {
     client_state = e_active;
@@ -410,3 +414,4 @@ int main(int argc, char *argv[])
     WSACleanup();
     return 0;
 }
+*/

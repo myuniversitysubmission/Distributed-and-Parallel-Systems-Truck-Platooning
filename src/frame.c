@@ -67,5 +67,9 @@ DataFrame *parseMessage(const char *message)
     df->eventType = (EventType)eventInt;
     df->readWriteFlag = (e_rw)tempReadWrite;
 
+    if (eventInt < INTRUSION || eventInt > CLIENT_LEFT) {
+        return NULL;
+    }
+
     return df;  // caller free()
 }
