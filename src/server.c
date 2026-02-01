@@ -450,7 +450,7 @@ void urgentBrakeAll(void)
 }
 
 
-/*
+
 int main(void)
 {
 #ifndef USE_LINUX
@@ -579,4 +579,4 @@ int main(void)
 #endif
 
     return 0;
-}*/
+}
