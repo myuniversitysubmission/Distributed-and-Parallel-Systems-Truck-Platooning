@@ -9,9 +9,9 @@
 ## How to run
 **To compile:**
 ```
-    gcc -Iinclude src/server.c src/frame.c src/queue.c -o server.exe -lws2_32
-    gcc -Iinclude src/client.c src/frame.c src/queue.c -o client.exe -lws2_32
-```
+    gcc -Iinclude -DBUILD_SERVER src/server.c src/frame.c src/queue.c src/logical_clock.c -o server.exe -lws2_32
+
+    gcc -Iinclude -DBUILD_CLIENT src/client.c src/frame.c src/logical_clock.c src/queue.c -o client.exe -lws2_32                                ```
 **To run:**
 ```
     ./server.exe
@@ -21,7 +21,7 @@
 
 **To run test suit:**
 ```
-    gcc -Iinclude src/frame.c src/queue.c src/client.c src/server.c tests/tests.c -o tests.exe -lcunit -lpthread -lws2_32
+    gcc -Iinclude src/frame.c src/queue.c src/client.c src/server.c tests/tests.c src/logical_clock.c -o tests.exe -lcunit -lpthread -lws2_32
  
 ```
 # Changes

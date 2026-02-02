@@ -599,7 +599,7 @@ int main(void)
             g_clients[id]           = newClient;   // for broadcasting
             newClient->client_id    = ++id;
             printf("\n[INFO] New truck connected, assigned ID = %d", id);
-            newClient->client_position = ++g_followerCount;
+            newClient->client_position = g_followerCount;
             //pthread_mutex__lock(&g_server_lc.mutex);
             lc_reset_node(&g_server_lc, newClient->client_id);
             lc_set_node_diag(&g_server_lc, newClient->client_id, 1);
