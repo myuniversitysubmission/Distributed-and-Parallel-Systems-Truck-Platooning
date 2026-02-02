@@ -34,12 +34,16 @@ static int g_lc_initialized = 0;
 // Global hedefler (server'dan gelen komutlarla değişecek)
 int g_targetSpeed    = 80;
 int g_targetDistance = 100;
+    bool intrusionReported         = false;
+    bool platoonStable             = false;
+    bool intrusionScenarioInjected = false;  // intrusion testi için "fizik" simulasyonu
+    bool emergencyReported         = false;  // emergency sadece bir kez raporlansın
 
 bool matchSpeed(struct Truck *t, int targetSpeed)
 {
     int step = 5;
 
-    //pthread_mutex__lock(&truck_mutex);
+    pthread_mutex_lock(&truck.truck_mutex);
 
     if (t->currentSpeed < targetSpeed) {
         t->currentSpeed += step;
@@ -53,7 +57,7 @@ bool matchSpeed(struct Truck *t, int targetSpeed)
 
     printf("\n Truck %d: Speed = %d\n", t->id, t->currentSpeed);
 
-    //pthread_mutex__unlock(&truck_mutex);
+    pthread_mutex_unlock(&truck.truck_mutex);
     return (t->currentSpeed == targetSpeed);
 }
 
@@ -61,7 +65,7 @@ bool matchDistance(struct Truck *t, int targetDistance)
 {
     int distanceStep = 10;
 
-    //pthread_mutex__lock(&truck_mutex);
+    pthread_mutex_lock(&truck.truck_mutex);
 
     if (t->currentDistance < targetDistance) {
         t->currentDistance += distanceStep;
@@ -75,7 +79,7 @@ bool matchDistance(struct Truck *t, int targetDistance)
 
     printf("\n Truck %d: Distance = %d\n", t->id, t->currentDistance);
 
-    //pthread_mutex__unlock(&truck_mutex);
+    pthread_mutex_unlock(&truck.truck_mutex);
     return (t->currentDistance == targetDistance);
 }
 
@@ -84,7 +88,7 @@ void reportIntrusion(struct Truck *t)
     int speed = 20;
     int step  = 5;
 
-    //pthread_mutex__lock(&truck_mutex);
+    pthread_mutex_lock(&truck.truck_mutex);
 
     if (t->currentSpeed > speed) {
         t->currentSpeed -= step;
@@ -98,7 +102,7 @@ void reportIntrusion(struct Truck *t)
                t->id, t->currentSpeed);
     }
 
-    //pthread_mutex__unlock(&truck_mutex);
+    pthread_mutex_unlock(&truck.truck_mutex);
 }
 
 void *TXthread(void *socketTXCopy)
@@ -106,10 +110,6 @@ void *TXthread(void *socketTXCopy)
     SOCKET *SocketTX = (SOCKET *)socketTXCopy;
 
     int  temp_case                 = SPEED;
-    bool intrusionReported         = false;
-    bool platoonStable             = false;
-    bool intrusionScenarioInjected = false;  // intrusion testi için "fizik" simulasyonu
-    bool emergencyReported         = false;  // emergency sadece bir kez raporlansın
 
     while (client_state == e_active) {
         char *msg = NULL;
@@ -125,26 +125,16 @@ void *TXthread(void *socketTXCopy)
                    truck.id, truck.currentSpeed, truck.currentDistance);
         }
 
-        // 3) "Gerçek dünya" intrusion simulasyonu:
-        //    Platoon stable olduktan sonra, bir kere mesafeyi aniden düşür (araya araç girmiş gibi)
-        if (platoonStable && !intrusionScenarioInjected) {
-            //pthread_mutex__lock(&truck_mutex);
-            truck.currentDistance = 10;   // intrusion tetiklenebilecek kadar yakın
-            //pthread_mutex__unlock(&truck_mutex);
-
-            printf("\n Truck %d: SIMULATED PHYSICAL INTRUSION -> distance DROPPED to %d\n",
-                   truck.id, truck.currentDistance);
-
-            intrusionScenarioInjected = true;
-        }
-
         // 4) EMERGENCY tetikleyici (daha kritik, önce kontrol et)
-        if (platoonStable && !emergencyReported && truck.currentDistance < 20) {
+        if (emergencyReported) {
             temp_case = EMERGENCY_BRAKE;
         }
         // 5) Normal intrusion tetikleyici
-        else if (platoonStable && !intrusionReported && truck.currentDistance < 30) {
+        else if (intrusionReported) {
             temp_case = INTRUSION;
+            pthread_mutex_lock(&truck.truck_mutex);
+            truck.currentDistance = 10;   // intrusion tetiklenebilecek kadar yakın
+            pthread_mutex_unlock(&truck.truck_mutex);
         }
 
         // 6) Frame seçimi ve gönderimi
@@ -160,7 +150,9 @@ void *TXthread(void *socketTXCopy)
                 truck.currentDistance,  // value: currentDistance
                 INTRUSION               // eventType
             );
-            intrusionReported = true;   // intrusion sadece bir kez raporlanacak
+            printf("\n Truck %d: SIMULATED PHYSICAL INTRUSION -> distance DROPPED to %d\n",
+                   truck.id, truck.currentDistance);
+            intrusionReported = false;   // intrusion sadece bir kez raporlanacak
             temp_case = SPEED;          // sonraki loop'ta normal akışa dön
             break;
 
@@ -189,9 +181,9 @@ void *TXthread(void *socketTXCopy)
 
         case EMERGENCY_BRAKE:
             // Lokal olarak hedef hızı 0'a çek
-            //pthread_mutex__lock(&truck_mutex);
+            //pthread_mutex_lock(&truck.truck_mutex);
             g_targetSpeed = 0;
-            //pthread_mutex__unlock(&truck_mutex);
+            //pthread_mutex_unlock(&truck.truck_mutex);
 
             printf("\n Truck %d: LOCAL EMERGENCY TRIGGERED, reporting to server\n",
                    truck.id);
@@ -203,7 +195,7 @@ void *TXthread(void *socketTXCopy)
                 truck.currentDistance,  // value: o anki mesafe
                 EMERGENCY_BRAKE
             );
-            emergencyReported = true;   // bir kere raporla yeter
+            emergencyReported = false;   // bir kere raporla yeter
             temp_case = SPEED;          // akış SPEED/DISTANCE ile devam eder (hedef hız 0)
             break;
 
@@ -221,7 +213,7 @@ void *TXthread(void *socketTXCopy)
         char *full = NULL;
         // printf("\n initiated? =%d",g_lc_initialized );
         if (g_lc_initialized) {
-            //pthread_mutex__lock(&g_lc.mutex);
+            //pthread_mutex_lock(&g_lc.mutex);
             lc_inc_local(&g_lc); // local send event
             char *mat = lc_serialize_matrix(&g_lc);
             if (mat) {
@@ -234,7 +226,7 @@ void *TXthread(void *socketTXCopy)
             }
             // printf("\n print 1(TX after messageConstruction), %d=init status", g_lc_initialized);
             lc_print(&g_lc);
-            //pthread_mutex__unlock(&g_lc.mutex);
+            //pthread_mutex_unlock(&g_lc.mutex);
         }
 
         // Choose buffer to send (full matrix appended if available)
@@ -274,10 +266,10 @@ void *TXthread(void *socketTXCopy)
 
 void client_apply_emergency_brake(void)
 {
-    //pthread_mutex__lock(&truck_mutex);
+    //pthread_mutex_lock(&truck.truck_mutex);
     g_targetSpeed      = 0;
     truck.currentSpeed = 0;
-    //pthread_mutex__unlock(&truck_mutex);
+    //pthread_mutex_unlock(&truck.truck_mutex);
 }
 
 void *RXthread(void *socketRXCopy)
@@ -335,12 +327,12 @@ void *RXthread(void *socketRXCopy)
                 char *p = strstr(RXBuffer, "MATRIX:");
                 if (p) {
                     p += strlen("MATRIX:");
-                    //pthread_mutex__lock(&g_lc.mutex);
+                    //pthread_mutex_lock(&g_lc.mutex);
                     lc_merge_matrix_from_str(&g_lc, p); // server id = 0 inside matrix
                     lc_inc_local(&g_lc); // receive event
                     // printf("\n print 2(rx,recvd client id), %d=init status", g_lc_initialized);
                     lc_print(&g_lc);     // print matrix after receiving initial ID
-                    //pthread_mutex__unlock(&g_lc.mutex);
+                    //pthread_mutex_unlock(&g_lc.mutex);
 
                 }
             }
@@ -379,11 +371,11 @@ void *RXthread(void *socketRXCopy)
             printf("\n Client %d-New position = %d ", truck.id, receivedFrame->value);
             if (g_lc_initialized) {
                 // receivedFrame->param contains leftId (same ID space as matrix)
-                //pthread_mutex__lock(&g_lc.mutex);
+                //pthread_mutex_lock(&g_lc.mutex);
                 lc_reset_node(&g_lc, receivedFrame->param);
                 //printf("\n print 3(some client left), %d=init status", g_lc_initialized);
                 lc_print(&g_lc);
-                //pthread_mutex__unlock(&g_lc.mutex);
+                //pthread_mutex_unlock(&g_lc.mutex);
             }
             break;
 
@@ -395,15 +387,54 @@ void *RXthread(void *socketRXCopy)
             char *p = strstr(RXBuffer, "MATRIX:");
             if (p) {
                 p += strlen("MATRIX:");
-                //pthread_mutex__lock(&g_lc.mutex);
+                //pthread_mutex_lock(&g_lc.mutex);
                 lc_merge_matrix_from_str(&g_lc, p);
                 lc_inc_local(&g_lc); // receive event
                 //printf("\n print 4(RX@ end), %d=init status", g_lc_initialized);
                 lc_print(&g_lc);     // print matrix after receive
-                //pthread_mutex__unlock(&g_lc.mutex);
+                //pthread_mutex_unlock(&g_lc.mutex);
             }
         }
     }
+    return NULL;
+}
+
+void *cmd_thread(void *arg) {
+    (void)arg;
+    char line[128];
+
+    while (client_state == e_active) {
+        if (!fgets(line, sizeof(line), stdin))
+            break;
+
+        // trim newline
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+
+        if (strcmp(line, "intrude") == 0) {
+            intrusionReported = true;
+
+        } else if (strcmp(line, "brake") == 0) {
+            emergencyReported = true;
+
+        } else if (strncmp(line, "set ", 4) == 0) {
+            int s, d;
+            if (sscanf(line + 4, "%d %d", &s, &d) == 2) {
+                truck.currentDistance = s; 
+                truck.currentSpeed = d;
+            } else {
+                printf("Usage: set <speed> <distance>\n");
+            }
+
+        } else if (strcmp(line, "quit") == 0) {
+            client_state = e_kill;  // tell supervisor to shut down
+            break;
+
+        } else {
+            printf("Unknown command: %s\n", line);
+        }
+    }
+
     return NULL;
 }
 
@@ -459,8 +490,12 @@ int main(int argc, char *argv[])
     truck.id             = 0;
     truck.currentSpeed   = atoi(argv[1]); // Only for initialisation
     truck.currentDistance = 0;            // TODO: get currentDistance from Server.
-
+    pthread_mutex_init(&truck.truck_mutex, NULL);
     pthread_t threadList[2];
+
+    pthread_t cmdThread;
+    pthread_create(&cmdThread, NULL, cmd_thread, NULL);
+    pthread_detach(cmdThread);
 
     pthread_create(&threadList[1], NULL, RXthread, &clientSocket);
     pthread_detach(threadList[1]);
