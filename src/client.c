@@ -9,6 +9,7 @@
 
 #include "truck.h"
 #include "frame.h"
+#include "logical_clock.h"  
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -24,7 +25,11 @@ typedef enum {
 
 struct Truck truck;
 volatile state client_state = e_active;
-pthread_mutex_t truck_mutex = PTHREAD_MUTEX_INITIALIZER;
+//pthread_mutex__t truck_mutex = //pthread_mutex__INITIALIZER;
+
+// Logical clock for client
+static MatrixClock g_lc;
+static int g_lc_initialized = 0;
 
 // Global hedefler (server'dan gelen komutlarla değişecek)
 int g_targetSpeed    = 80;
@@ -34,7 +39,7 @@ bool matchSpeed(struct Truck *t, int targetSpeed)
 {
     int step = 5;
 
-    pthread_mutex_lock(&truck_mutex);
+    //pthread_mutex__lock(&truck_mutex);
 
     if (t->currentSpeed < targetSpeed) {
         t->currentSpeed += step;
@@ -48,7 +53,7 @@ bool matchSpeed(struct Truck *t, int targetSpeed)
 
     printf("\n Truck %d: Speed = %d\n", t->id, t->currentSpeed);
 
-    pthread_mutex_unlock(&truck_mutex);
+    //pthread_mutex__unlock(&truck_mutex);
     return (t->currentSpeed == targetSpeed);
 }
 
@@ -56,7 +61,7 @@ bool matchDistance(struct Truck *t, int targetDistance)
 {
     int distanceStep = 10;
 
-    pthread_mutex_lock(&truck_mutex);
+    //pthread_mutex__lock(&truck_mutex);
 
     if (t->currentDistance < targetDistance) {
         t->currentDistance += distanceStep;
@@ -70,7 +75,7 @@ bool matchDistance(struct Truck *t, int targetDistance)
 
     printf("\n Truck %d: Distance = %d\n", t->id, t->currentDistance);
 
-    pthread_mutex_unlock(&truck_mutex);
+    //pthread_mutex__unlock(&truck_mutex);
     return (t->currentDistance == targetDistance);
 }
 
@@ -79,7 +84,7 @@ void reportIntrusion(struct Truck *t)
     int speed = 20;
     int step  = 5;
 
-    pthread_mutex_lock(&truck_mutex);
+    //pthread_mutex__lock(&truck_mutex);
 
     if (t->currentSpeed > speed) {
         t->currentSpeed -= step;
@@ -93,7 +98,7 @@ void reportIntrusion(struct Truck *t)
                t->id, t->currentSpeed);
     }
 
-    pthread_mutex_unlock(&truck_mutex);
+    //pthread_mutex__unlock(&truck_mutex);
 }
 
 void *TXthread(void *socketTXCopy)
@@ -123,9 +128,9 @@ void *TXthread(void *socketTXCopy)
         // 3) "Gerçek dünya" intrusion simulasyonu:
         //    Platoon stable olduktan sonra, bir kere mesafeyi aniden düşür (araya araç girmiş gibi)
         if (platoonStable && !intrusionScenarioInjected) {
-            pthread_mutex_lock(&truck_mutex);
+            //pthread_mutex__lock(&truck_mutex);
             truck.currentDistance = 10;   // intrusion tetiklenebilecek kadar yakın
-            pthread_mutex_unlock(&truck_mutex);
+            //pthread_mutex__unlock(&truck_mutex);
 
             printf("\n Truck %d: SIMULATED PHYSICAL INTRUSION -> distance DROPPED to %d\n",
                    truck.id, truck.currentDistance);
@@ -167,6 +172,7 @@ void *TXthread(void *socketTXCopy)
                 truck.currentDistance,
                 SPEED                   // eventType
             );
+            //printf("\nis this working");
             temp_case = DISTANCE;
             break;
 
@@ -183,9 +189,9 @@ void *TXthread(void *socketTXCopy)
 
         case EMERGENCY_BRAKE:
             // Lokal olarak hedef hızı 0'a çek
-            pthread_mutex_lock(&truck_mutex);
+            //pthread_mutex__lock(&truck_mutex);
             g_targetSpeed = 0;
-            pthread_mutex_unlock(&truck_mutex);
+            //pthread_mutex__unlock(&truck_mutex);
 
             printf("\n Truck %d: LOCAL EMERGENCY TRIGGERED, reporting to server\n",
                    truck.id);
@@ -212,15 +218,31 @@ void *TXthread(void *socketTXCopy)
             continue;
         }
 
-        if (msg == NULL) {
-            printf("Failed to construct frame message\n");
-            closesocket(*SocketTX);
-            return NULL;
+        char *full = NULL;
+        // printf("\n initiated? =%d",g_lc_initialized );
+        if (g_lc_initialized) {
+            //pthread_mutex__lock(&g_lc.mutex);
+            lc_inc_local(&g_lc); // local send event
+            char *mat = lc_serialize_matrix(&g_lc);
+            if (mat) {
+                int newlen = (int)strlen(msg) + (int)strlen(mat) + 4;
+                full = (char *)malloc(newlen);
+                if (full) {
+                    snprintf(full, newlen, "%s|%s", msg, mat);
+                }
+                free(mat);
+            }
+            // printf("\n print 1(TX after messageConstruction), %d=init status", g_lc_initialized);
+            lc_print(&g_lc);
+            //pthread_mutex__unlock(&g_lc.mutex);
         }
 
-        int len       = (int)strlen(msg);
-        int bytesSent = send(*SocketTX, msg, len, 0);
+        // Choose buffer to send (full matrix appended if available)
+        char *sendBuf = (full != NULL) ? full : msg;
+        int len = (int)strlen(sendBuf);
+        int bytesSent = send(*SocketTX, sendBuf, len, 0);
 
+        //socket error handling
         if (bytesSent == SOCKET_ERROR) {
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK) {
@@ -241,6 +263,8 @@ void *TXthread(void *socketTXCopy)
         }
 
         free(msg);
+        if (full) free(full);
+
         sleep(5); // Sleep briefly to avoid busy-waiting
     }
 
@@ -250,10 +274,10 @@ void *TXthread(void *socketTXCopy)
 
 void client_apply_emergency_brake(void)
 {
-    pthread_mutex_lock(&truck_mutex);
+    //pthread_mutex__lock(&truck_mutex);
     g_targetSpeed      = 0;
     truck.currentSpeed = 0;
-    pthread_mutex_unlock(&truck_mutex);
+    //pthread_mutex__unlock(&truck_mutex);
 }
 
 void *RXthread(void *socketRXCopy)
@@ -268,6 +292,7 @@ void *RXthread(void *socketRXCopy)
 
         //(2) parse message / check error in message
         if (bytesReceived > 0) {
+            printf("\n[RX] From server : %s", RXBuffer);
             RXBuffer[bytesReceived] = '\0';
             receivedFrame = parseMessage(RXBuffer);
 
@@ -300,6 +325,25 @@ void *RXthread(void *socketRXCopy)
             truck.id = receivedFrame->truck_id;
             truck.position = receivedFrame->value;
             printf("Received Truck ID = %u, Position = %u", truck.id, truck.position);
+
+                        // initialize logical clock once we know our id
+            lc_init(&g_lc, LOGICAL_MAX_NODES, truck.id);
+            g_lc_initialized = 1;
+
+            // also parse server matrix if present in raw buffer
+            {
+                char *p = strstr(RXBuffer, "MATRIX:");
+                if (p) {
+                    p += strlen("MATRIX:");
+                    //pthread_mutex__lock(&g_lc.mutex);
+                    lc_merge_matrix_from_str(&g_lc, p); // server id = 0 inside matrix
+                    lc_inc_local(&g_lc); // receive event
+                    // printf("\n print 2(rx,recvd client id), %d=init status", g_lc_initialized);
+                    lc_print(&g_lc);     // print matrix after receiving initial ID
+                    //pthread_mutex__unlock(&g_lc.mutex);
+
+                }
+            }
             break;
 
         case SPEED:
@@ -333,17 +377,37 @@ void *RXthread(void *socketRXCopy)
         case CLIENT_LEFT:
             printf("\n Client %d left platoon", receivedFrame->param);
             printf("\n Client %d-New position = %d ", truck.id, receivedFrame->value);
-            // break eklemek istersen buraya ekleyebilirsin
-            // break;
+            if (g_lc_initialized) {
+                // receivedFrame->param contains leftId (same ID space as matrix)
+                //pthread_mutex__lock(&g_lc.mutex);
+                lc_reset_node(&g_lc, receivedFrame->param);
+                //printf("\n print 3(some client left), %d=init status", g_lc_initialized);
+                lc_print(&g_lc);
+                //pthread_mutex__unlock(&g_lc.mutex);
+            }
+            break;
 
         default:
             printf("\n Undefined state");
+        }
+        
+        if (g_lc_initialized) {
+            char *p = strstr(RXBuffer, "MATRIX:");
+            if (p) {
+                p += strlen("MATRIX:");
+                //pthread_mutex__lock(&g_lc.mutex);
+                lc_merge_matrix_from_str(&g_lc, p);
+                lc_inc_local(&g_lc); // receive event
+                //printf("\n print 4(RX@ end), %d=init status", g_lc_initialized);
+                lc_print(&g_lc);     // print matrix after receive
+                //pthread_mutex__unlock(&g_lc.mutex);
+            }
         }
     }
     return NULL;
 }
 
-/*
+#if defined(BUILD_CLIENT)
 int main(int argc, char *argv[])
 {
     client_state = e_active;
@@ -414,4 +478,5 @@ int main(int argc, char *argv[])
     WSACleanup();
     return 0;
 }
-*/
+#endif
+

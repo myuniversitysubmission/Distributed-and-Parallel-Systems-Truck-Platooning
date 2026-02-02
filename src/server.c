@@ -11,6 +11,7 @@
 #include "truck.h"
 #include "frame.h"
 #include "queue.h"
+#include "logical_clock.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -47,6 +48,7 @@ u_long mode           = NON_BLOCKING;
 u_long modeConnection = BLOCKING;
 unsigned int g_followerCount = 0;
 clientInfo *g_clients[MAX_CLIENTS] = {0};
+static MatrixClock g_server_lc; // Logical_clock matrix in server
 
 // High-resolution timer globals (for WCET measurement)
 LARGE_INTEGER g_perfFreq;
@@ -77,6 +79,10 @@ int assignFreeID(void)
 // To inform all other clients if one client left the platoon. Used for clock matrix
 void broadcastClientLeft(unsigned int leftId, unsigned int leftPosition)
 {
+    //pthread_mutex__lock(&g_server_lc.mutex);
+    lc_reset_node(&g_server_lc, leftId);
+    //pthread_mutex__unlock(&g_server_lc.mutex);
+
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_clients[i] != NULL && g_clients[i]->client_id != leftId) {
             DataFrame *df = (DataFrame *)malloc(sizeof(DataFrame));
@@ -139,6 +145,9 @@ void server_handle_intrusion(clientInfo *tempArgument, DataFrame *receivedFrame)
         distCmd->value         = safeDist;
         TxQueue_push(&tempArgument->txQueue, distCmd);
     }
+    //pthread_mutex__lock(&g_server_lc.mutex);
+    lc_inc_local(&g_server_lc);
+    //pthread_mutex__unlock(&g_server_lc.mutex);
 }
 
 void *ServerRxHandler(void *clientInfoRxCopy)
@@ -173,6 +182,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
 
             receivedFrame = parseMessage(RXBuffer);
             if (!receivedFrame) {
+                #if !defined(BUILD_SERVER)
                 double end_ms = now_ms();
                 double elapsed_ms = end_ms - start_ms;
                 if (elapsed_ms > g_max_rx_ms) {
@@ -180,7 +190,8 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 }
                 printf("[WCET DEBUG] RX job (parse fail) took %.6f ms (max so far = %.6f ms)\n",
                        elapsed_ms, g_max_rx_ms);
-                continue;
+                #endif
+                //continue;
             }
 
             /* --- EMERGENCY_BRAKE HANDLING --- */
@@ -193,6 +204,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 free(receivedFrame);
                 receivedFrame = NULL;
 
+                #if !defined(BUILD_SERVER)
                 double end_ms = now_ms();
                 double elapsed_ms = end_ms - start_ms;
                 if (elapsed_ms > g_max_rx_ms) {
@@ -200,6 +212,7 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 }
                 printf("[WCET DEBUG] RX job (EMERGENCY_BRAKE) took %.6f ms (max so far = %.6f ms)\n",
                        elapsed_ms, g_max_rx_ms);
+                #endif
                 continue;
             }
 
@@ -209,7 +222,8 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 server_handle_intrusion(tempArgument, receivedFrame);
                 free(receivedFrame);
                 receivedFrame = NULL;
-
+                
+                #if !defined(BUILD_SERVER)
                 double end_ms = now_ms();
                 double elapsed_ms = end_ms - start_ms;
                 if (elapsed_ms > g_max_rx_ms) {
@@ -217,14 +231,15 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 }
                 printf("[WCET DEBUG] RX job (INTRUSION) took %.6f ms (max so far = %.6f ms)\n",
                        elapsed_ms, g_max_rx_ms);
+                #endif
                 continue;
             }
 
             /* --- SPEED / DISTANCE: telemetry only, do not echo back --- */
             if (receivedFrame->eventType == SPEED || receivedFrame->eventType == DISTANCE) {
-                free(receivedFrame);
-                receivedFrame = NULL;
-
+                // free(receivedFrame);
+                // receivedFrame = NULL;
+                #if !defined(BUILD_SERVER)
                 double end_ms = now_ms();
                 double elapsed_ms = end_ms - start_ms;
                 if (elapsed_ms > g_max_rx_ms) {
@@ -232,13 +247,15 @@ void *ServerRxHandler(void *clientInfoRxCopy)
                 }
                 printf("[WCET DEBUG] RX job (telemetry) took %.6f ms (max so far = %.6f ms)\n",
                        elapsed_ms, g_max_rx_ms);
-                continue;
+                #endif
+                // continue;
             }
 
             /* --- Other events: push to TX queue --- */
             TxQueue_push(&tempArgument->txQueue, receivedFrame);
             receivedFrame = NULL;
-
+            
+            #if !defined(BUILD_SERVER)
             double end_ms = now_ms();
             double elapsed_ms = end_ms - start_ms;
             if (elapsed_ms > g_max_rx_ms) {
@@ -246,6 +263,8 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             }
             printf("[WCET DEBUG] RX job (other) took %.6f ms (max so far = %.6f ms)\n",
                    elapsed_ms, g_max_rx_ms);
+            #endif
+
         }
 
         if (bytesReceived == SOCKET_ERROR) {
@@ -306,6 +325,16 @@ void *ServerRxHandler(void *clientInfoRxCopy)
             free(tempArgument);
             return NULL;
         }
+
+        char *p = strstr(RXBuffer, "MATRIX:");
+            if (p) {
+                p += strlen("MATRIX:");
+                //pthread_mutex__lock(&g_server_lc.mutex);
+                lc_merge_matrix_from_str(&g_server_lc, p);
+                lc_inc_local(&g_server_lc); // server receives -> event
+                lc_print(&g_server_lc);     // print matrix after receive
+                //pthread_mutex__unlock(&g_server_lc.mutex);
+            }
     }
 }
 
@@ -325,6 +354,7 @@ void *ServerTxHandler(void *clientInfoTxCopy)
 
         char *frame;
         if (msg.eventType == SHUTDOWN) {
+            #if !defined(BUILD_SERVER)
             double end_ms = now_ms();
             double elapsed_ms = end_ms - start_ms;
             if (elapsed_ms > g_max_tx_ms) {
@@ -332,7 +362,8 @@ void *ServerTxHandler(void *clientInfoTxCopy)
             }
             printf("[WCET DEBUG] TX job (SHUTDOWN) took %.6f ms (max so far = %.6f ms)\n",
                    elapsed_ms, g_max_tx_ms);
-            break; 
+            break;
+            #endif 
         }
 
         switch (msg.eventType) {
@@ -354,6 +385,7 @@ void *ServerTxHandler(void *clientInfoTxCopy)
                 msg.value,
                 SPEED
             );
+            //printf("\nis this wokring -1");
             break;
 
         case DISTANCE:
@@ -394,10 +426,30 @@ void *ServerTxHandler(void *clientInfoTxCopy)
         }
 
         if (frame) {
-            send(s, frame, (int)strlen(frame), 0);
+            // append server clock row
+            //printf("is this working -2 ");
+            //pthread_mutex__lock(&g_server_lc.mutex);
+            lc_inc_local(&g_server_lc); // sending is local event
+            char *mat = lc_serialize_matrix(&g_server_lc); // server matrix
+            char *toSend = NULL;
+            if (mat) {
+                int newlen = (int)strlen(frame) + (int)strlen(mat) + 4;
+                toSend = (char *)malloc(newlen);
+                if (toSend) {
+                    snprintf(toSend, newlen, "%s|%s", frame, mat);
+                }
+                free(mat);
+            }
+            if (toSend == NULL) toSend = frame;
+            send(s, toSend, (int)strlen(toSend), 0);
+            if (toSend != frame) free(toSend);
             free(frame);
-        }
 
+            lc_print(&g_server_lc); // print matrix for global event
+            //pthread_mutex__unlock(&g_server_lc.mutex);
+        }
+        
+        #if !defined(BUILD_SERVER)
         double end_ms = now_ms();
         double elapsed_ms = end_ms - start_ms;
         if (elapsed_ms > g_max_tx_ms) {
@@ -406,9 +458,12 @@ void *ServerTxHandler(void *clientInfoTxCopy)
 
         printf("[WCET DEBUG] TX job took %.6f ms (max so far = %.6f ms)\n",
                elapsed_ms, g_max_tx_ms);
+        #endif
     }
+    #if !defined(BUILD_SERVER)
     printf("[INFO] TX thread for client %d terminated. Estimated WCET per message = %.6f ms\n",
            ci->client_id, g_max_tx_ms);
+    #endif
     printf("Client RX thread destroyed");
     return NULL;
 }
@@ -419,6 +474,11 @@ void urgentBrakeAll(void)
     double start_ms = now_ms();   // start emergency task timing
 
     //printf("[WARN] Urgent brake is being applied to ALL clients!\n");
+    //pthread_mutex__lock(&g_server_lc.mutex);
+    lc_inc_local(&g_server_lc);
+    lc_print(&g_server_lc); // print matrix for global event]
+    //pthread_mutex__unlock(&g_server_lc.mutex);
+    printf("\n\n\nURGETN BRAKE ALL\n\n\n");
 
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (g_clients[i] == NULL) {
@@ -450,7 +510,7 @@ void urgentBrakeAll(void)
 }
 
 
-/*
+#if defined(BUILD_SERVER)
 int main(void)
 {
 #ifndef USE_LINUX
@@ -511,6 +571,7 @@ int main(void)
 #endif
         return 1;
     }
+    lc_init(&g_server_lc, LOGICAL_MAX_NODES, 0); // server has id 0
 
     printf("[INFO] Server is listening on port %d...\n", PORT);
 
@@ -538,7 +599,11 @@ int main(void)
             g_clients[id]           = newClient;   // for broadcasting
             newClient->client_id    = ++id;
             printf("\n[INFO] New truck connected, assigned ID = %d", id);
-            newClient->client_position = g_followerCount;
+            newClient->client_position = ++g_followerCount;
+            //pthread_mutex__lock(&g_server_lc.mutex);
+            lc_reset_node(&g_server_lc, newClient->client_id);
+            lc_set_node_diag(&g_server_lc, newClient->client_id, 1);
+            //pthread_mutex__unlock(&g_server_lc.mutex);
 
             TxQueue_init(&newClient->txQueue);
 
@@ -550,8 +615,26 @@ int main(void)
                 newClient->client_position,
                 CLIENT_ID
             );
-            send(newSocket, clientIdFrame, (int)strlen(clientIdFrame), 0);
+            //pthread_mutex__lock(&g_server_lc.mutex);
+            lc_inc_local(&g_server_lc); // local send event
+            char *mat = lc_serialize_matrix(&g_server_lc);
+            if (mat) {
+                int newlen = (int)strlen(clientIdFrame) + (int)strlen(mat) + 4;
+                char *toSend = (char *)malloc(newlen);
+                if (toSend) {
+                    snprintf(toSend, newlen, "%s|%s", clientIdFrame, mat);
+                    send(newSocket, toSend, (int)strlen(toSend), 0);
+                    free(toSend);
+                } else {
+                    send(newSocket, clientIdFrame, (int)strlen(clientIdFrame), 0);
+                }
+                free(mat);
+            } else {
+                send(newSocket, clientIdFrame, (int)strlen(clientIdFrame), 0);
+            }
             free(clientIdFrame);
+            lc_print(&g_server_lc);
+            //pthread_mutex__unlock(&g_server_lc.mutex);
 
             printf("\n[INFO] New connection, socket fd is %d\n", newSocket);
             usleep(1000); // Sleep briefly to avoid busy-waiting
@@ -579,4 +662,6 @@ int main(void)
 #endif
 
     return 0;
-}*/
+}
+
+#endif // end of build_server
