@@ -20,16 +20,16 @@ cpu = sys.bind_resource(
 
 
 C_rx = 0.5   # ms  (WCET of ServerRxHandler)
-T_rx = 10.0    # ms  (period)
-D_rx = 10.0    # ms  (deadline)
+T_rx = 2.0    # ms  (period)
+D_rx = 2.0    # ms  (deadline)
 
 C_tx = 0.1   # ms  (WCET of ServerTxHandler per message)
-T_tx = 10.0    # ms
-D_tx = 10.0    # ms
+T_tx = 2.0    # ms
+D_tx = 2.0    # ms
 
 C_emerg = 0.2  # ms  (WCET of urgentBrakeAll)
-T_emerg = 10.0  # ms  (minimum inter-arrival time)
-D_emerg = 10.0  # ms
+T_emerg = 2.0  # ms  (minimum inter-arrival time)
+D_emerg = 2.0  # ms
 
 # Task priorities:
 # 1 = highest precedence, 3 = least precedence
