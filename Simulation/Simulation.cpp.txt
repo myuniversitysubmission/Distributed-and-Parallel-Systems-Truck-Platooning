@@ -1,0 +1,213 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// ===== LCD =====
+LiquidCrystal_I2C lcd(0x3F, 16, 2); // common address: 0x27 (sometimes 0x3F)
+
+// ===== HC-SR04 =====
+const int PIN_TRIG = 10;
+const int PIN_ECHO = 11;
+
+// ===== Inputs =====
+const int PIN_HAZARD = 4;   // external pull-down: not pressed=LOW, pressed=HIGH
+const int PIN_MU     = A0;  // optional
+
+// ===== LEDs =====
+const int LED_NORMAL  = 8;  // Green
+const int LED_COMFORT = 7;  // Yellow
+const int LED_EMG     = 9;  // Red
+
+// ===== Parameters =====
+const float d0    = 2.0;    // m
+const float Tgap  = 0.5;    // s
+const float d_crit = 0.30;  // m emergency distance threshold
+
+// Comfort shaping
+const int   BRAKE_MAX_PWM = 220;
+const float ERR_FULL_M    = 1.5;
+
+// ===== Leader/Follower speed demo settings =====
+// Leader ramps from 10 -> 90 km/h slowly
+const float VLEAD_START_KMH = 10.0;
+const float VLEAD_END_KMH   = 90.0;
+const float VLEAD_RAMP_TIME_S = 25.0;  // time to reach 90 km/h
+
+// Follower tries to track leader but slightly slower response (simple model)
+const float VFOLLOW_RESPONSE = 0.05;   // per control step (0..1), higher = faster tracking
+
+// Update rate
+const unsigned long CTRL_PERIOD_MS = 150;
+
+// ---- helpers ----
+float clampf(float x, float lo, float hi) {
+  if (x < lo) return lo;
+  if (x > hi) return hi;
+  return x;
+}
+
+float mapf(float x, float in_min, float in_max, float out_min, float out_max) {
+  x = clampf(x, in_min, in_max);
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+float kmh_to_ms(float v_kmh) { return v_kmh * (1000.0 / 3600.0); }
+float ms_to_kmh(float v_ms)  { return v_ms * (3600.0 / 1000.0); }
+
+float readDistanceMeters_HCSR04() {
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+
+  unsigned long duration = pulseIn(PIN_ECHO, HIGH, 30000UL); // 30ms timeout
+  if (duration == 0) return 999.0;
+
+  float dist_cm = duration / 58.0;
+  return dist_cm / 100.0;
+}
+
+void setNormal() {
+  digitalWrite(LED_EMG, LOW);
+  digitalWrite(LED_COMFORT, LOW);
+  digitalWrite(LED_NORMAL, HIGH);
+}
+void setComfort() {
+  digitalWrite(LED_EMG, LOW);
+  digitalWrite(LED_NORMAL, LOW);
+  digitalWrite(LED_COMFORT, HIGH);
+}
+void setEmergency() {
+  digitalWrite(LED_NORMAL, LOW);
+  digitalWrite(LED_COMFORT, LOW);
+  digitalWrite(LED_EMG, HIGH);
+}
+
+void setup() {
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+
+  pinMode(PIN_HAZARD, INPUT); // external pull-down
+  pinMode(LED_NORMAL, OUTPUT);
+  pinMode(LED_COMFORT, OUTPUT);
+  pinMode(LED_EMG, OUTPUT);
+
+  setNormal();
+
+  Serial.begin(9600);
+
+  // LCD init
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Platooning ECU");
+  lcd.setCursor(0,1);
+  lcd.print("Init...");
+  delay(800);
+}
+
+void loop() {
+  static unsigned long lastCtrl = 0;
+  static unsigned long t0 = 0;
+  static float vLead_kmh = VLEAD_START_KMH;
+  static float vFollow_kmh = VLEAD_START_KMH;
+
+  unsigned long now = millis();
+  if (now - lastCtrl < CTRL_PERIOD_MS) return;
+  lastCtrl = now;
+
+  if (t0 == 0) t0 = now;
+  float t_s = (now - t0) / 1000.0;
+
+  // ----- Leader speed ramp: 10 -> 90 km/h -----
+  float alpha = clampf(t_s / VLEAD_RAMP_TIME_S, 0.0, 1.0);
+  vLead_kmh = VLEAD_START_KMH + alpha * (VLEAD_END_KMH - VLEAD_START_KMH);
+
+  // ----- Follower tracks leader gradually (simple 1st order) -----
+  vFollow_kmh = vFollow_kmh + (vLead_kmh - vFollow_kmh) * VFOLLOW_RESPONSE;
+
+  // ----- Sensor + inputs -----
+  int hazardRaw = digitalRead(PIN_HAZARD);
+  bool hazardPressed = (hazardRaw == HIGH);
+
+  float gap_m = readDistanceMeters_HCSR04();
+
+  int muAdc = analogRead(PIN_MU);
+  float mu_est = mapf(muAdc, 0, 1023, 0.2, 1.0);
+
+  // target gap based on follower speed
+  float vFollow_ms = kmh_to_ms(vFollow_kmh);
+  float gap_ref = d0 + Tgap * vFollow_ms;
+
+  // ----- TTC -----
+  float vRel_ms = kmh_to_ms(vFollow_kmh - vLead_kmh); // positive => closing
+  bool ttcInf = (vRel_ms <= 0.01) || (gap_m > 990.0);
+  float ttc_s = ttcInf ? 9999.0 : (gap_m / vRel_ms);
+
+  // ----- Mode logic (Priority) -----
+  const char* mode = "NORMAL";
+  int brake_cmd = 0;
+
+  if (hazardPressed) {
+    mode = "EMG_BTN";
+    brake_cmd = 255;
+    setEmergency();
+  } else if (gap_m <= d_crit) {
+    mode = "EMG_DST";
+    brake_cmd = 255;
+    setEmergency();
+  } else {
+    float err = gap_ref - gap_m; // positive => too close
+    if (err > 0.0) {
+      mode = "COMFORT";
+      float b = mapf(err, 0.0, ERR_FULL_M, 0.0, (float)BRAKE_MAX_PWM);
+      b *= mu_est;
+      brake_cmd = (int)clampf(b, 0.0, 255.0);
+      setComfort();
+    } else {
+      mode = "NORMAL";
+      brake_cmd = 0;
+      setNormal();
+    }
+  }
+
+  // ----- LCD update -----
+  // Line 1: speeds
+  lcd.setCursor(0, 0);
+  lcd.print("L:");
+  lcd.print((int)(vLead_kmh + 0.5));
+  lcd.print(" F:");
+  lcd.print((int)(vFollow_kmh + 0.5));
+  lcd.print("kmh ");
+  // pad end (avoid leftover chars)
+  lcd.print("   ");
+
+  // Line 2: distance + TTC
+  lcd.setCursor(0, 1);
+  lcd.print("D:");
+  if (gap_m > 990.0) {
+    lcd.print("NA  ");
+  } else {
+    lcd.print(gap_m, 1);
+    lcd.print("m ");
+  }
+
+  lcd.print("T:");
+  if (ttcInf) {
+    lcd.print("INF ");
+  } else {
+    lcd.print(ttc_s, 1);
+    lcd.print("s ");
+  }
+
+  // ----- Serial debug -----
+  Serial.print("mode="); Serial.print(mode);
+  Serial.print(" hazRaw="); Serial.print(hazardRaw);
+  Serial.print(" gap_m="); Serial.print(gap_m, 2);
+  Serial.print(" gap_ref="); Serial.print(gap_ref, 2);
+  Serial.print(" vL(kmh)="); Serial.print(vLead_kmh, 1);
+  Serial.print(" vF(kmh)="); Serial.print(vFollow_kmh, 1);
+  Serial.print(" TTC(s)="); Serial.print(ttcInf ? -1.0 : ttc_s, 2);
+  Serial.print(" brake="); Serial.println(brake_cmd);
+}
